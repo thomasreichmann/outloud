@@ -57,7 +57,9 @@ if (-not $src -or -not (Test-Path (Join-Path $src 'Outloud.exe'))) {
 Stop-Outloud
 New-Item -ItemType Directory -Force -Path (Join-Path $dest 'mac') | Out-Null
 if ((Resolve-Path $src).ProviderPath.TrimEnd('\') -ne $dest.TrimEnd('\')) {
-    Copy-Item -Force (Join-Path $src '*.exe'), (Join-Path $src 'install.ps1'), (Join-Path $src 'LICENSE') $dest
+    Copy-Item -Force (Join-Path $src '*.exe'), (Join-Path $src 'install.ps1'), (Join-Path $src 'LICENSE'), (Join-Path $src 'THIRD_PARTY_NOTICES.txt') $dest
+    # The Mac receivers changed form over time, so clear out older ones.
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $dest 'mac\*')
     Copy-Item -Force (Join-Path $src 'mac\*') (Join-Path $dest 'mac')
 }
 if ($tmp) { Remove-Item -Recurse -Force $tmp }

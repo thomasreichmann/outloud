@@ -47,8 +47,9 @@ func installPaths() (paths, error) {
 	}, nil
 }
 
-// install copies this binary into an app bundle in Application Support and
-// registers a LaunchAgent that runs it at login, with args as its flags.
+// install copies the app bundle this binary runs from, or else the binary
+// alone, to Application Support, and registers a LaunchAgent that runs it at
+// login, with args as its flags.
 func install(args []string) error {
 	p, err := installPaths()
 	if err != nil {
@@ -61,17 +62,26 @@ func install(args []string) error {
 	if self, err = filepath.EvalSymlinks(self); err != nil {
 		return err
 	}
-	if app := bundleOf(self); app != "" && certSigned(app) {
-		// A release: Outloud.app as built, signed with Outloud's certificate.
-		// It is installed untouched, so that macOS knows it after an update
-		// and keeps its permission to record.
-		if app != p.app {
-			if err := copyApp(app, p.app); err != nil {
-				return err
-			}
+	switch app := bundleOf(self); app {
+	case p.app:
+		// Installed already; this only updates the login item.
+	case "":
+		// A bare binary, as `go build` makes.
+		if err := copyBinary(self, p.binary); err != nil {
+			return err
 		}
-	} else if err := makeApp(self, p); err != nil {
-		return err
+	default:
+		if err := copyApp(app, p.app); err != nil {
+			return err
+		}
+	}
+	// A release comes signed with Outloud's certificate and stays untouched,
+	// so that macOS knows it after an update and keeps its permission to
+	// record. Anything else is signed ad hoc.
+	if !certSigned(p.app) {
+		if err := signAdHoc(p); err != nil {
+			return err
+		}
 	}
 	// The plain path, which earlier versions installed to, stays usable.
 	if err := os.Remove(p.link); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -221,22 +231,22 @@ func plist(args []string, logPath string) []byte {
 	return b.Bytes()
 }
 
-// makeApp builds the app bundle around the binary self, for a receiver that
-// does not come in a signed one, such as a development build.
-func makeApp(self string, p paths) error {
-	if err := os.MkdirAll(filepath.Dir(p.binary), 0o755); err != nil {
+// copyBinary puts a copy of the binary self at to. It replaces what is there
+// by rename, never in place: macOS caches code signatures per file and kills
+// a binary that was overwritten while cached.
+func copyBinary(self, to string) error {
+	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
 		return err
 	}
-	if self != p.binary {
-		// Replace by rename, never in place: macOS caches code signatures
-		// per file and kills a binary that was overwritten while cached.
-		if err := copyFile(self, p.binary+".new", 0o755); err != nil {
-			return err
-		}
-		if err := os.Rename(p.binary+".new", p.binary); err != nil {
-			return err
-		}
+	if err := copyFile(self, to+".new", 0o755); err != nil {
+		return err
 	}
+	return os.Rename(to+".new", to)
+}
+
+// signAdHoc completes the installed app bundle and signs it ad hoc, for a
+// receiver that does not come signed, such as a development build.
+func signAdHoc(p paths) error {
 	if err := os.WriteFile(filepath.Join(p.app, "Contents", "Info.plist"), infoPlist(), 0o644); err != nil {
 		return err
 	}
@@ -282,8 +292,8 @@ func certSigned(app string) bool {
 	return err == nil && !bytes.Contains(out, []byte("Signature=adhoc"))
 }
 
-// copyApp puts a copy of the bundle app at to. Like the binary, the bundle
-// is replaced by rename, never in place.
+// copyApp puts a copy of the bundle app at to. Like a binary, the bundle is
+// replaced by rename, never in place.
 func copyApp(app, to string) error {
 	tmp, old := to+".new", to+".old"
 	_ = os.RemoveAll(tmp)

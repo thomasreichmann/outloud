@@ -46,14 +46,16 @@ $rsrc -arch amd64 -ico build/outloud.ico -o cmd/outloud-send/rsrc_windows_amd64.
 out=dist/Outloud
 rm -rf dist
 mkdir -p "$out/mac"
+go run ./tools/notices > "$out/THIRD_PARTY_NOTICES.txt"
 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$ldflags -H windowsgui" -o "$out/Outloud.exe" ./cmd/outloud
 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$ldflags" -o "$out/outloud-send.exe" ./cmd/outloud-send
 for arch in arm64 amd64; do
 	app="build/mac-$arch/Outloud.app"
 	rm -rf "build/mac-$arch"
-	mkdir -p "$app/Contents/MacOS"
+	mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 	GOOS=darwin GOARCH=$arch go build -trimpath -ldflags "$ldflags" -o "$app/Contents/MacOS/outloud-receiver" ./cmd/outloud-receiver
 	sed "s#__VERSION__#$version#" cmd/outloud-receiver/Info.plist > "$app/Contents/Info.plist"
+	cp LICENSE "$out/THIRD_PARTY_NOTICES.txt" "$app/Contents/Resources/"
 	if [ -n "${MAC_SIGN_KEYCHAIN:-}" ]; then
 		sign_mac "$app"
 	fi

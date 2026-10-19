@@ -302,3 +302,9 @@ without publishing.
 ## License
 
 [MIT](LICENSE)
+
+The programs also contain the Go standard library and a few Go modules,
+under their own licenses (BSD and Apache 2.0). `THIRD_PARTY_NOTICES.txt` has
+them all: next to the installed programs on the PC, and in
+`Outloud.app/Contents/Resources` on the Mac. `tools/notices` writes it at
+every build, from what each program imports.

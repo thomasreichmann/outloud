@@ -9,6 +9,8 @@
   do not.
 - Both changes are on the Mac, so update it. 0.4.0 and 0.3 work together,
   so updating one side at a time is fine.
+- The licenses of the third-party code in Outloud now come with it, in
+  `THIRD_PARTY_NOTICES.txt`.
 
 **Coming from 0.2? Update both the PC and the Mac**, with the commands
 below: 0.3 and later cannot talk to 0.2. The first time the updated PC picks
