@@ -10,8 +10,8 @@ import (
 	"github.com/thomasreichmann/outloud/internal/wasapi"
 )
 
-func newCapture(device string, native bool) source.Source {
-	return &wasapi.Loopback{Device: device, NativeFormat: native}
+func newCapture(device string, native, excludeSelf bool) source.Source {
+	return &wasapi.Loopback{Device: device, NativeFormat: native, ExcludeSelf: func() bool { return excludeSelf }}
 }
 
 func openOutput(p *playout.Playout) (func(), error) {

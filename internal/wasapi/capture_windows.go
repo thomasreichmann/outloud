@@ -55,6 +55,16 @@ type Loopback struct {
 	// NativeFormat captures in the device's mix format and converts in Go,
 	// instead of asking Windows for stereo float. For diagnostics.
 	NativeFormat bool
+	// ExcludeSelf, if set, is asked whether to leave this process's own
+	// playback out of the capture. It is left out only while the device
+	// captured is the Windows default, where this process plays.
+	ExcludeSelf func() bool
+
+	noProcessLoopback bool // process loopback failed once; do not retry
+}
+
+func (l *Loopback) wantExclude() bool {
+	return l.ExcludeSelf != nil && !l.noProcessLoopback && l.ExcludeSelf()
 }
 
 const (
@@ -71,7 +81,10 @@ const (
 	retryDelay     = time.Second
 )
 
-var errDefaultChanged = errors.New("default playback device changed")
+var (
+	errDefaultChanged = errors.New("default playback device changed")
+	errModeChanged    = errors.New("leaving out this process's sound was turned on or off")
+)
 
 func (l *Loopback) Run(ctx context.Context, emit func(source.Event)) error {
 	runtime.LockOSThread()
@@ -93,7 +106,7 @@ func (l *Loopback) Run(ctx context.Context, emit func(source.Event)) error {
 		}
 		emit(source.Event{Kind: source.Idle})
 		delay := retryDelay
-		if errors.Is(err, errDefaultChanged) {
+		if errors.Is(err, errDefaultChanged) || errors.Is(err, errModeChanged) {
 			delay = 0
 		} else {
 			emit(source.Event{Kind: source.Status, Err: err})
@@ -116,10 +129,39 @@ func (l *Loopback) capture(ctx context.Context, e *enumerator, emit func(source.
 	defer dev.Release()
 	id, _ := dev.id()
 	name, _ := dev.name()
+	defaultID := func() string {
+		d, err := e.defaultRender()
+		if err != nil {
+			return ""
+		}
+		defer d.Release()
+		cur, _ := d.id()
+		return cur
+	}
 
-	client, conv, rate, err := l.initialize(dev)
-	if err != nil {
-		return fmt.Errorf("%s: %w", name, err)
+	var (
+		client    *audioClient
+		conv      *source.Converter
+		rate      int
+		excluding = l.wantExclude() && defaultID() == id
+	)
+	if excluding {
+		var event windows.Handle
+		client, event, rate, err = l.initializeExcludingSelf(dev)
+		if err != nil {
+			l.noProcessLoopback, excluding = true, false
+			emit(source.Event{Kind: source.Status, Err: fmt.Errorf("cannot leave Outloud's own sound out of the capture: %w", err)})
+		} else {
+			defer windows.CloseHandle(event) // after the client is released
+			conv = source.NewConverter(source.Float32, 2, 0x3)
+			name += " (without Outloud's own sound)"
+		}
+	}
+	if !excluding {
+		client, conv, rate, err = l.initialize(dev)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
 	}
 	defer client.Release()
 	cc, err := client.captureClient()
@@ -215,17 +257,33 @@ func (l *Loopback) capture(ctx context.Context, e *enumerator, emit func(source.
 			lastVolume = now
 			sendVolume()
 		}
-		if l.Device == "" && now.Sub(lastCheck) >= defaultCheck {
+		if now.Sub(lastCheck) >= defaultCheck {
 			lastCheck = now
-			if d, err := e.defaultRender(); err == nil {
-				cur, _ := d.id()
-				d.Release()
-				if cur != id {
+			if cur := defaultID(); cur != "" {
+				if l.Device == "" && cur != id {
 					return errDefaultChanged
+				}
+				if want := l.wantExclude() && cur == id; want != excluding {
+					return errModeChanged
 				}
 			}
 		}
 	}
+}
+
+// initializeExcludingSelf sets up process loopback at dev's mix rate.
+func (l *Loopback) initializeExcludingSelf(dev *device) (*audioClient, windows.Handle, int, error) {
+	c, err := dev.audioClient()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	mix, err := c.mixFormat()
+	c.Release()
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	client, event, err := initializeExcludingSelf(mix.SamplesPerSec)
+	return client, event, int(mix.SamplesPerSec), err
 }
 
 func (l *Loopback) open(e *enumerator) (*device, error) {

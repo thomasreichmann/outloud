@@ -18,7 +18,7 @@ func (noCapture) Run(context.Context, func(source.Event)) error {
 	return errors.New("capturing is only implemented on Windows; use -tone")
 }
 
-func newCapture(string, bool) source.Source { return noCapture{} }
+func newCapture(string, bool, bool) source.Source { return noCapture{} }
 
 func devices() error { return errors.New("only implemented on Windows") }
 

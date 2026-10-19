@@ -53,6 +53,8 @@ func main() {
 	followVolume := fs.Bool("follow-volume", false, "apply the Windows volume and mute on the receiver")
 	tone := fs.Bool("tone", false, "send a test beep instead of capturing")
 	native := fs.Bool("native-format", false, "capture in the device's own format and convert here (diagnostics)")
+	hear := fs.Bool("hear", false, "also play the receiver's own sound here, leaving it out of what is sent")
+	excludeSelf := fs.Bool("exclude-self", false, "leave this program's own playback out of the capture (diagnostics; implied by -hear)")
 	verbose := fs.Bool("v", false, "print the receiver's buffer statistics every 5 s")
 	browseType := fs.String("browse-type", proto.ServiceType, "service type for list (diagnostics)")
 	port := fs.Int("port", macsetup.DefaultPort, "port for serve-mac")
@@ -61,7 +63,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	var src source.Source = newCapture(*device, *native)
+	var src source.Source = newCapture(*device, *native, *excludeSelf || *hear)
 	if *tone {
 		src = source.Tone{Freq: 440, Gain: 0.1}
 	}
@@ -69,6 +71,13 @@ func main() {
 	var err error
 	switch cmd {
 	case "":
+		if *hear {
+			go func() {
+				if err := listen(ctx, parseTarget(*to), *latency, *verbose); err != nil {
+					logf("listening: %v", err)
+				}
+			}()
+		}
 		err = stream(ctx, src, parseTarget(*to), *latency, *followVolume, *verbose)
 	case "listen":
 		err = listen(ctx, parseTarget(*to), *latency, *verbose)

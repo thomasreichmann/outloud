@@ -265,7 +265,8 @@ func (a *app) restart() {
 	}
 
 	s := &sender.Sender{
-		Source:        &wasapi.Loopback{Device: cfg.Device},
+		// While a Mac's sound plays here, it must not be sent back.
+		Source:        &wasapi.Loopback{Device: cfg.Device, ExcludeSelf: a.hearingOn},
 		Target:        sender.Target{Name: cfg.Receiver, Addr: cfg.Address},
 		Name:          a.hostname,
 		Latency:       time.Duration(cfg.LatencyMs) * time.Millisecond,
@@ -328,6 +329,12 @@ func (a *app) restartHear() {
 		defer close(r.done)
 		l.Run(ctx)
 	}()
+}
+
+func (a *app) hearingOn() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg.hearing()
 }
 
 // output opens the audio output on first use. Called with restartMu held.
