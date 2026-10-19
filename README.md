@@ -44,7 +44,8 @@ unzip it and run `install.cmd`.
 
 **2. On the Mac**, install the receiver. The easiest way: in the tray menu
 choose **Set up a Mac…**. It shows a command to paste into Terminal on the
-Mac, which downloads the receiver straight from your PC. Or, in Terminal:
+Mac, which downloads the receiver straight from your PC and pairs the two.
+Or, in Terminal:
 
 ```sh
 curl -fsSL https://github.com/thomasreichmann/outloud/releases/latest/download/install-mac.sh | sh
@@ -58,7 +59,8 @@ asks whether Outloud may record the Mac's audio; allow that to hear the Mac
 on the PC.
 
 **3. Pick the Mac** under **Speakers** in the tray menu. If it is the only one
-on the network, a fresh install picks it by itself.
+on the network, a fresh install picks it by itself. Unless you set the Mac up
+from the PC, the two pair now: see [Pairing](#pairing).
 
 The binaries are not code-signed. Both one-line installers download with
 tools that do not mark files as coming from the internet, so SmartScreen and
@@ -76,13 +78,50 @@ Gatekeeper do not interfere; the zip's installer removes that mark itself.
 | **Capture from** | the default playback device (follows changes), or a fixed one |
 | **Follow Windows volume** | apply the PC's volume and mute on the Mac (off by default) |
 | **Start with Windows** | |
-| **Set up a Mac…** | serve the receiver installer to a Mac on the network |
+| **Paired Macs** | the Macs this PC is paired with; choose one to forget it |
+| **Set up a Mac…** | serve the receiver installer to a Mac on the network, pairing the two |
 
 The icon is dim while not connected, solid when connected, and shows blue
 sound waves while sound is flowing. Nothing is sent while nothing plays, and
 after 10 s of silence the Mac lets go of its audio device so it can sleep. If
 the network hiccups and the sound drops out, the Mac buffers a little more
 for a while, then creeps back to the latency you chose.
+
+### Pairing
+
+A Mac only plays sound from PCs it is paired with, and only lets those hear
+it; everything between them is encrypted. Nobody else on the network can
+use the Mac or listen in.
+
+The first time you pick a Mac on the PC, the two pair. The PC shows a
+six-digit code, and the Mac asks whether to pair with the PC, showing a code
+too. If the codes match, click **Allow** on the Mac and **OK** on the PC.
+Matching codes prove that each is talking to the other, and not to something
+in between. They pair once, for both directions.
+
+Not at the Mac? Answer in Terminal instead, also over SSH. `allow` on its own
+shows the request; with the code the PC shows, it allows it. A different code
+is refused.
+
+```sh
+~/Library/Application\ Support/Outloud/outloud-receiver allow
+~/Library/Application\ Support/Outloud/outloud-receiver allow 822291
+~/Library/Application\ Support/Outloud/outloud-receiver deny
+```
+
+A Mac set up with **Set up a Mac…** is paired by the setup command itself, so
+it asks nothing. That command carries the PC's key: the Mac only accepts the
+receiver from that PC, and only that PC is paired.
+
+To unpair, on the PC choose the Mac under **Paired Macs**. On the Mac, list
+and forget PCs in Terminal:
+
+```sh
+~/Library/Application\ Support/Outloud/outloud-receiver paired
+~/Library/Application\ Support/Outloud/outloud-receiver forget DESKTOP-1234
+```
+
+A forgotten PC is cut off within seconds, and has to pair again to connect.
 
 ### Hearing the Mac on the PC
 
@@ -121,6 +160,8 @@ some diagnostics:
 outloud-send list                         receivers on the network
 outloud-send devices                      playback devices
 outloud-send meter                        captured levels and the device's real clock rate
+outloud-send pair -to "Kitchen Mac"       pair, comparing codes in the terminal
+outloud-send paired                       the paired receivers (shared with the tray app)
 outloud-send -to "Kitchen Mac" -v         stream, printing the Mac's buffer statistics
 outloud-send -to 192.168.1.20 -tone       send a test beep instead of capturing
 outloud-send listen -to "Kitchen Mac"     play the Mac's sound on this PC
@@ -140,6 +181,14 @@ On the Mac, `outloud-receiver` runs in the foreground when started without
 - **The Mac is not listed.** Both computers must be on the same network, and
   the Mac must be awake. If macOS keeps the receiver from announcing itself,
   use **Connect by address…** with the address from the Mac's log.
+- **"Not paired" or no pairing question on the Mac.** Pick the Mac again under
+  **Speakers** to retry. If the Mac shows nothing, its log says why; the Mac
+  must be logged in to show the question, and it ignores requests for 10 s
+  after someone clicks **Don't Allow**.
+- **The Mac is listed as "(needs update)".** It runs a receiver from before
+  pairing, which this PC cannot use. Install it again (step 2 above). A PC
+  with an older Outloud gets "peer speaks protocol version 2" from an updated
+  Mac; update the PC.
 - **Crackling.** Choose a higher **Latency**. If the crackle is steady rather
   than occasional, the Mac's own output buffer is too small: reinstall the
   receiver with `-device-buffer 80ms`.
@@ -166,23 +215,22 @@ Logs: `%LOCALAPPDATA%\Outloud\Outloud.log` (tray menu ▸ **Open log**) and
 - **PC:** Settings ▸ Apps ▸ Installed apps ▸ Outloud ▸ Uninstall. This also
   removes its settings and logs.
 - **Mac:** `~/Library/Application\ Support/Outloud/outloud-receiver uninstall`.
-  This removes the receiver (`Outloud.app` in that folder) and its login
-  item; the log stays.
+  This removes the receiver (`Outloud.app` in that folder), its login item,
+  its key and its paired PCs; the log stays.
 
 ## Limitations
 
-- Audio is sent unencrypted, and the receiver plays for any sender on the
-  network, and sends the Mac's sound to any PC that asks. Use it on networks
-  you trust.
-- One sender at a time: a second PC takes over from the first. Likewise one
-  PC at a time can hear the Mac.
+- One sender at a time: a second paired PC takes over from the first.
+  Likewise one PC at a time can hear the Mac.
+- Anyone on the network can see that a receiver is there, and what it is
+  called, and can ask to pair, which the Mac asks you about.
 - The binaries are not code-signed, so macOS may ask again for permission to
   record the Mac's audio after the receiver is updated.
 
 ## How it works
 
 The PC captures a playback device with WASAPI loopback capture, through
-hand-written COM bindings, and sends 16-bit stereo PCM over TCP. The Mac keeps
+hand-written COM bindings, and sends 16-bit stereo PCM over TLS. The Mac keeps
 a target amount of audio buffered. A PI controller watches the time-averaged
 buffer level and resamples by a tiny, continuously adjusted ratio (4-point
 Hermite interpolation), so the two sound cards' clocks never drift apart.
@@ -197,6 +245,16 @@ captures with process loopback, which leaves out Outloud's own playback. The
 receiver installs as an app bundle, because macOS asks for permission to
 record audio on behalf of apps.
 
+Each PC and Mac makes its own key the first time it runs. In every
+connection both sides present theirs in TLS 1.3, and each checks the other's
+against its paired devices rather than against certificate authorities. To
+pair, the PC commits to a random value before seeing the Mac's, and then
+reveals it; the code both show is a hash of both keys and both values. So
+something in the middle of a connection, holding a key of its own, causes
+two different codes and cannot pick values to make them match. The setup
+command pins the PC's key with `curl --pinnedpubkey`, and carries a random
+token that lets only that Mac pair back.
+
 | path | |
 |---|---|
 | `cmd/outloud` | Windows tray app |
@@ -207,10 +265,12 @@ record audio on behalf of apps.
 | `internal/playout` | jitter buffer, drift-correcting resampler, adaptive latency |
 | `internal/playback` | plays a playout on the default output, on either side |
 | `internal/proto` | wire protocol |
+| `internal/pairing` | keys, paired devices, TLS and the pairing code |
 | `internal/mdns` | discovery and advertising |
 | `internal/sender`, `internal/receiver` | connection handling on each side |
 | `internal/listener` | the PC's side of hearing the Mac |
-| `internal/macsetup` | serves the receiver and `install.sh` to a Mac |
+| `internal/macsetup` | serves the receiver and `install.sh` to a Mac, and pairs with it |
+| `internal/macalert` | the Mac's pairing question, from a process with no window |
 
 ## Building
 

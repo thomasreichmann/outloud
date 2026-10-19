@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/thomasreichmann/outloud/internal/mdns"
+	"github.com/thomasreichmann/outloud/internal/pairing"
 	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/receiver"
@@ -40,14 +41,16 @@ type output interface {
 }
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "install" || os.Args[1] == "uninstall") {
-		var err error
-		if os.Args[1] == "install" {
-			err = install(os.Args[2:])
-		} else {
-			err = uninstall()
-		}
-		if err != nil {
+	commands := map[string]func([]string) error{
+		"install":   install,
+		"uninstall": func([]string) error { return uninstall() },
+		"paired":    func([]string) error { return listPaired() },
+		"forget":    forget,
+		"allow":     allow,
+		"deny":      deny,
+	}
+	if len(os.Args) > 1 && commands[os.Args[1]] != nil {
+		if err := commands[os.Args[1]](os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -59,9 +62,16 @@ func main() {
 		fmt.Fprintf(fs.Output(), `Usage: outloud-receiver [flags]
        outloud-receiver install [flags]   start at login (macOS LaunchAgent)
        outloud-receiver uninstall
+       outloud-receiver paired            list the PCs paired with this computer
+       outloud-receiver forget NAME|all   unpair a PC
+       outloud-receiver allow [CODE]      show a PC's request to pair, or allow it
+       outloud-receiver deny              turn a PC's request to pair away
 
 Plays audio streamed from a Windows PC running Outloud, and sends this
-computer's own sound to a PC that listens. %s.
+computer's own sound to a PC that listens. Only paired PCs can do either:
+the first time a PC connects, this computer asks whether to pair with it,
+on screen. "allow" answers from a terminal instead, also over SSH; it takes
+the code the PC shows. %s.
 
 Flags:
 `, version.String())
@@ -85,6 +95,11 @@ Flags:
 	if *name == "" {
 		*name = computerName()
 	}
+	id, err := pairing.LoadIdentity(dataDir())
+	if err != nil {
+		log.Fatalf("loading this computer's key: %v", err)
+	}
+	peers := pairing.OpenStore(dataDir())
 
 	var out output
 	p := playout.New(playout.Config{
@@ -131,7 +146,7 @@ Flags:
 	default:
 		log.Fatalf("unknown -capture %q", *capture)
 	}
-	txt := []string{"v=1"}
+	txt := []string{proto.VersionTXT}
 	if own != nil {
 		txt = append(txt, proto.CaptureTXT)
 	}
@@ -140,7 +155,25 @@ Flags:
 		log.Printf("not advertised on the network (%v); senders need this computer's address", err)
 		stopAdvertising = func() {}
 	}
-	srv := &receiver.Server{Name: *name, Playout: p, Latency: *latency, Capture: own, Log: log.Default()}
+	ctl := &control{path: socketPath(), askLocally: askLocally}
+	stopControl, err := ctl.listen()
+	if err != nil {
+		log.Printf("pairing can only be answered on screen: %v", err)
+		stopControl = func() {}
+	}
+	srv := &receiver.Server{
+		Name: *name, Playout: p, Latency: *latency, Capture: own,
+		Identity: id, Peers: peers, Confirm: ctl.confirm, Log: log.Default(),
+	}
+	var names []string
+	if list, err := peers.List(); err != nil {
+		log.Printf("reading the paired PCs: %v", err)
+	} else {
+		for _, pc := range list {
+			names = append(names, fmt.Sprintf("%q", pc.Name))
+		}
+	}
+	log.Printf("key %s; %d paired PCs %v", pairing.Short(id.ID), len(names), names)
 	go func() {
 		if err := srv.Serve(l); err != nil {
 			log.Fatal(err)
@@ -154,6 +187,7 @@ Flags:
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
 	stopAdvertising()
+	stopControl()
 	if rec != nil {
 		if err := rec.Close(); err != nil {
 			log.Print(err)

@@ -9,13 +9,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/thomasreichmann/outloud/internal/mdns"
+	"github.com/thomasreichmann/outloud/internal/pairing"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/source"
 	"github.com/thomasreichmann/outloud/internal/version"
@@ -57,6 +60,7 @@ type Status struct {
 	State    State
 	Receiver string // the receiver's name
 	Software string // the receiver's software and version
+	PeerID   string // the ID of the receiver's key
 	Addr     string
 	Device   string // what is being captured
 	Rate     int
@@ -111,6 +115,10 @@ type Sender struct {
 	Target Target
 	// Name is shown on the receiver.
 	Name string
+	// Identity is this device's key, and Peers the receivers paired with
+	// it; the receiver must be one of them.
+	Identity *pairing.Identity
+	Peers    *pairing.Store
 	// Latency is the buffer target to ask the receiver for; 0 uses the
 	// receiver's default.
 	Latency time.Duration
@@ -140,7 +148,9 @@ func (s *Sender) update(f func(*Status)) {
 	}
 }
 
-// Run streams until ctx is cancelled.
+// Run streams until ctx is cancelled. It gives up only if the receiver and
+// this device are not paired, returning an error that wraps
+// pairing.ErrNotPaired; the status has that error too.
 func (s *Sender) Run(ctx context.Context) error {
 	backoff := time.Second
 	for {
@@ -158,6 +168,9 @@ func (s *Sender) Run(ctx context.Context) error {
 			backoff = time.Second
 		}
 		s.update(func(st *Status) { *st = Status{State: Disconnected, Addr: addr, Err: err} })
+		if errors.Is(err, pairing.ErrNotPaired) {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -167,50 +180,131 @@ func (s *Sender) Run(ctx context.Context) error {
 	}
 }
 
+var (
+	// ErrOutdated means the receiver closed the connection on seeing this
+	// protocol version, which only older receivers do.
+	ErrOutdated = errors.New("the receiver runs an older version of Outloud, which needs updating")
+	// ErrNoCapture means the receiver cannot share its own sound.
+	ErrNoCapture = errors.New("the receiver cannot share its sound")
+	// ErrBusy means the receiver is pairing with someone else.
+	ErrBusy = errors.New("the receiver is busy pairing; try again in a moment")
+)
+
+// Conn is a connection to a receiver whose handshake is done.
+type Conn struct {
+	net.Conn // TLS
+	raw      net.Conn
+	Reader   *proto.Reader
+	// Peer is the receiver's Hello, and PeerID the ID of its key.
+	Peer   proto.Hello
+	PeerID string
+}
+
+// Close drops the connection at once. It skips the TLS goodbye, which
+// could wait on a stalled network for seconds.
+func (c *Conn) Close() error { return c.raw.Close() }
+
 // Dial connects to the receiver at addr and exchanges Hellos. The version
-// and software of hello are filled in.
-func Dial(ctx context.Context, addr string, hello proto.Hello) (net.Conn, *proto.Reader, proto.Hello, error) {
+// and software of hello are filled in. Unless hello asks to pair, the
+// receiver must be among peers, and this device among the receiver's paired
+// devices, or the error wraps pairing.ErrNotPaired.
+func Dial(ctx context.Context, addr string, hello proto.Hello, id *pairing.Identity, peers *pairing.Store) (*Conn, error) {
 	d := net.Dialer{Timeout: dialTimeout, KeepAlive: 5 * time.Second}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, nil, proto.Hello{}, err
+		return nil, err
 	}
-	fail := func(err error) (net.Conn, *proto.Reader, proto.Hello, error) {
-		conn.Close()
-		return nil, nil, proto.Hello{}, err
+	fail := func(err error) (*Conn, error) {
+		raw.Close()
+		return nil, fmt.Errorf("%s: %w", addr, err)
 	}
-	_ = conn.SetDeadline(time.Now().Add(handshakeWait))
-	if err := proto.WriteMagic(conn); err != nil {
+	_ = raw.SetDeadline(time.Now().Add(handshakeWait))
+	if err := proto.WriteMagic(raw); err != nil {
 		return fail(err)
+	}
+	var magic [len(proto.Magic)]byte
+	if _, err := io.ReadFull(raw, magic[:]); err != nil {
+		// Older receivers hang up on this version's magic.
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			err = ErrOutdated
+		}
+		return fail(err)
+	}
+	if string(magic[:]) != proto.Magic {
+		return fail(fmt.Errorf("not an Outloud receiver (got %q)", magic[:]))
+	}
+	conn := pairing.Client(raw, id)
+	if err := conn.HandshakeContext(ctx); err != nil {
+		return fail(err)
+	}
+	peerID := pairing.PeerID(conn.ConnectionState())
+	// Checked before the Hello, which would make a receiver that knows this
+	// device start capturing for a listener.
+	if !hello.Pair && !peers.Paired(peerID) {
+		return fail(pairing.ErrNotPaired)
 	}
 	hello.Version, hello.Software = proto.Version, version.String()
 	if err := proto.WriteJSON(conn, proto.MsgHello, hello); err != nil {
 		return fail(err)
 	}
-	br := bufio.NewReader(conn)
-	if err := proto.ReadMagic(br); err != nil {
-		return fail(fmt.Errorf("%s: %w", addr, err))
-	}
-	rd := proto.NewReader(br)
+	rd := proto.NewReader(bufio.NewReader(conn))
 	peer, err := rd.ReadHello()
 	if err != nil {
-		return fail(fmt.Errorf("%s: %w", addr, err))
+		return fail(err)
 	}
-	_ = conn.SetDeadline(time.Time{})
-	return conn, rd, peer, nil
+	switch peer.Refused {
+	case "":
+	case proto.RefusedNotPaired:
+		return fail(pairing.ErrNotPaired)
+	case proto.RefusedNoCapture:
+		return fail(ErrNoCapture)
+	case proto.RefusedBusy:
+		return fail(ErrBusy)
+	default:
+		return fail(fmt.Errorf("the receiver refused: %s", peer.Refused))
+	}
+	_ = raw.SetDeadline(time.Time{})
+	return &Conn{Conn: conn, raw: raw, Reader: rd, Peer: peer, PeerID: peerID}, nil
+}
+
+// Pair pairs with the receiver at addr, whether or not they are paired
+// already: both sides show the same code, and each remembers the other if
+// both users agree. ask shows this side's user the receiver's name and the
+// code, and must return false soon after cancel is closed. It returns the
+// receiver's name, and an error wrapping pairing.ErrCancelled or
+// pairing.ErrDeclined if a user said no.
+func Pair(ctx context.Context, addr, name string, id *pairing.Identity, peers *pairing.Store,
+	ask func(receiver, code string, cancel <-chan struct{}) bool) (string, error) {
+	c, err := Dial(ctx, addr, proto.Hello{Name: name, Pair: true}, id, peers)
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+	stop := context.AfterFunc(ctx, func() { c.Close() })
+	defer stop()
+	_ = c.SetDeadline(time.Now().Add(pairing.Timeout))
+	code, err := pairing.Initiate(c, c.Reader, id.ID, c.PeerID)
+	if err != nil {
+		return c.Peer.Name, err
+	}
+	err = pairing.Agree(c, c.Reader, func(cancel <-chan struct{}) bool { return ask(c.Peer.Name, code, cancel) })
+	if err != nil {
+		return c.Peer.Name, err
+	}
+	return c.Peer.Name, peers.Add(pairing.Peer{ID: c.PeerID, Name: c.Peer.Name, Paired: time.Now()})
 }
 
 // session runs one connection until it fails or ctx is done.
 func (s *Sender) session(ctx context.Context, addr string) error {
-	conn, rd, peer, err := Dial(ctx, addr, proto.Hello{Name: s.Name, LatencyMs: int(s.Latency / time.Millisecond)})
+	c, err := Dial(ctx, addr, proto.Hello{Name: s.Name, LatencyMs: int(s.Latency / time.Millisecond)}, s.Identity, s.Peers)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer c.Close()
 	s.update(func(st *Status) {
-		*st = Status{State: Connected, Receiver: peer.Name, Software: peer.Software, Addr: addr}
+		*st = Status{State: Connected, Receiver: c.Peer.Name, Software: c.Peer.Software, PeerID: c.PeerID, Addr: addr}
 	})
-	return s.stream(ctx, conn, rd)
+	return s.stream(ctx, c, c.Reader)
 }
 
 // Stream sends src over conn, whose handshake is done, until ctx is done,

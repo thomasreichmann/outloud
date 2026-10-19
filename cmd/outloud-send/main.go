@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -11,12 +13,14 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/thomasreichmann/outloud/internal/listener"
 	"github.com/thomasreichmann/outloud/internal/macsetup"
 	"github.com/thomasreichmann/outloud/internal/mdns"
+	"github.com/thomasreichmann/outloud/internal/pairing"
 	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/sender"
@@ -29,11 +33,16 @@ const outputRate = 48000
 const usage = `Usage:
   outloud-send [flags]        stream this PC's audio to a receiver
   outloud-send listen [flags] play a receiver's own sound on this PC
+  outloud-send pair [flags]   pair with a receiver, comparing a code
+  outloud-send paired         list the receivers paired with this PC
+  outloud-send forget NAME    unpair a receiver ("all" for every one)
   outloud-send list           find receivers on the network
   outloud-send devices        list playback devices
   outloud-send meter [flags]  show the level being captured, without sending
-  outloud-send serve-mac      serve the receiver installer to a Mac
+  outloud-send serve-mac      serve the receiver installer to a Mac, pairing with it
   outloud-send version        print the version
+
+This PC's key and paired receivers are shared with the Outloud tray app.
 
 Flags:
 `
@@ -67,20 +76,35 @@ func main() {
 	if *tone {
 		src = source.Tone{Freq: 440, Gain: 0.1}
 	}
+	keys := func() keys {
+		id, err := pairing.LoadIdentity(dataDir())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: loading this PC's key:", err)
+			os.Exit(1)
+		}
+		return keys{id, pairing.OpenStore(dataDir())}
+	}
 
 	var err error
 	switch cmd {
 	case "":
+		k := keys()
 		if *hear {
 			go func() {
-				if err := listen(ctx, parseTarget(*to), *latency, *verbose); err != nil {
+				if err := listen(ctx, k, parseTarget(*to), *latency, *verbose); err != nil {
 					logf("listening: %v", err)
 				}
 			}()
 		}
-		err = stream(ctx, src, parseTarget(*to), *latency, *followVolume, *verbose)
+		err = stream(ctx, k, src, parseTarget(*to), *latency, *followVolume, *verbose)
 	case "listen":
-		err = listen(ctx, parseTarget(*to), *latency, *verbose)
+		err = listen(ctx, keys(), parseTarget(*to), *latency, *verbose)
+	case "pair":
+		err = pair(ctx, keys(), parseTarget(*to))
+	case "paired":
+		err = listPaired(keys())
+	case "forget":
+		err = forget(keys(), fs.Args())
 	case "list":
 		err = list(ctx, *browseType)
 	case "devices":
@@ -88,17 +112,34 @@ func main() {
 	case "meter":
 		err = meter(ctx, src)
 	case "serve-mac":
-		err = serveMac(ctx, *port)
+		err = serveMac(ctx, keys(), *port)
 	case "version":
 		fmt.Println(version.String())
 	default:
 		fs.Usage()
 		os.Exit(2)
 	}
+	if errors.Is(err, pairing.ErrNotPaired) {
+		err = fmt.Errorf("%w; run \"outloud-send pair\" with the same -to to pair", err)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+// keys are this PC's key and paired receivers, kept with the tray app's.
+type keys struct {
+	id    *pairing.Identity
+	peers *pairing.Store
+}
+
+func dataDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "Outloud")
 }
 
 // parseTarget treats anything that looks like an address as one, and
@@ -114,7 +155,7 @@ func parseTarget(s string) sender.Target {
 	return sender.Target{Addr: s}
 }
 
-func stream(ctx context.Context, src source.Source, target sender.Target, latency time.Duration, volume, verbose bool) error {
+func stream(ctx context.Context, k keys, src source.Source, target sender.Target, latency time.Duration, volume, verbose bool) error {
 	name, _ := os.Hostname()
 	var last sender.Status
 	var lastStats time.Time
@@ -122,6 +163,8 @@ func stream(ctx context.Context, src source.Source, target sender.Target, latenc
 		Source:        src,
 		Target:        target,
 		Name:          name,
+		Identity:      k.id,
+		Peers:         k.peers,
 		Latency:       latency,
 		ForwardVolume: volume,
 		OnStatus: func(st sender.Status) {
@@ -141,7 +184,7 @@ func stream(ctx context.Context, src source.Source, target sender.Target, latenc
 					}
 					logf("connected to %q at %s (%s)", st.Receiver, st.Addr, sw)
 				case sender.Disconnected:
-					if st.Err != nil {
+					if st.Err != nil && !errors.Is(st.Err, pairing.ErrNotPaired) {
 						logf("not connected: %v (retrying)", st.Err)
 					}
 				}
@@ -167,7 +210,7 @@ func stream(ctx context.Context, src source.Source, target sender.Target, latenc
 	return s.Run(ctx)
 }
 
-func listen(ctx context.Context, target sender.Target, latency time.Duration, verbose bool) error {
+func listen(ctx context.Context, k keys, target sender.Target, latency time.Duration, verbose bool) error {
 	var wake func()
 	p := playout.New(playout.Config{OutputRate: outputRate, Target: latency, OnWake: func() { wake() }})
 	wake, err := openOutput(p)
@@ -200,11 +243,13 @@ func listen(ctx context.Context, target sender.Target, latency time.Duration, ve
 	name, _ := os.Hostname()
 	var last listener.Status
 	l := &listener.Listener{
-		Target:  target,
-		Name:    name,
-		Playout: p,
-		Latency: latency,
-		Log:     log.New(os.Stdout, "", log.Ltime),
+		Target:   target,
+		Name:     name,
+		Identity: k.id,
+		Peers:    k.peers,
+		Playout:  p,
+		Latency:  latency,
+		Log:      log.New(os.Stdout, "", log.Ltime),
 		OnStatus: func(st listener.Status) {
 			if st.State == last.State && st.Receiver == last.Receiver {
 				return
@@ -215,7 +260,7 @@ func listen(ctx context.Context, target sender.Target, latency time.Duration, ve
 			case sender.Connected:
 				logf("listening to %q at %s (%s)", st.Receiver, st.Addr, st.Software)
 			case sender.Disconnected:
-				if st.Err != nil {
+				if st.Err != nil && !errors.Is(st.Err, pairing.ErrNotPaired) {
 					logf("not connected: %v (retrying)", st.Err)
 				}
 			}
@@ -287,15 +332,94 @@ func meter(ctx context.Context, src source.Source) error {
 	})
 }
 
-func serveMac(ctx context.Context, port int) error {
-	cmd, err := macsetup.Serve(ctx, port, logf)
+func serveMac(ctx context.Context, k keys, port int) error {
+	name, _ := os.Hostname()
+	s := &macsetup.Server{
+		Port: port, Identity: k.id, Peers: k.peers, Name: name, Logf: logf,
+		OnPaired: func(p pairing.Peer) { logf("paired with %q", p.Name) },
+	}
+	cmd, err := s.Serve(ctx)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("\nOn the Mac, open Terminal and run:\n\n    %s\n\n"+
+		"It installs the receiver from this PC and pairs the two.\n"+
 		"If Windows asks whether to allow network access, allow it on private networks.\n"+
 		"Press Ctrl+C here when the Mac is set up.\n\n", cmd)
 	<-ctx.Done()
+	return nil
+}
+
+func pair(ctx context.Context, k keys, target sender.Target) error {
+	addr, err := sender.Resolve(ctx, target)
+	if err != nil {
+		return err
+	}
+	name, _ := os.Hostname()
+	logf("pairing with the receiver at %s ...", addr)
+	mac, err := sender.Pair(ctx, addr, name, k.id, k.peers, func(receiver, code string, cancel <-chan struct{}) bool {
+		fmt.Printf("\n%q now asks whether to pair with this PC. Allow it there if it shows\n\n    %s\n\n"+
+			"Does it show that code? [y/N] ", receiver, code)
+		return askYes(cancel)
+	})
+	switch {
+	case err == nil:
+		logf("paired with %q", mac)
+	case errors.Is(err, pairing.ErrCancelled):
+		logf("not paired")
+	case errors.Is(err, pairing.ErrDeclined):
+		return fmt.Errorf("%q did not allow pairing", mac)
+	default:
+		return err
+	}
+	return nil
+}
+
+// askYes reads a yes or no from the terminal, giving up when cancel is
+// closed.
+func askYes(cancel <-chan struct{}) bool {
+	answer := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		answer <- strings.ToLower(strings.TrimSpace(line))
+	}()
+	select {
+	case a := <-answer:
+		return a == "y" || a == "yes"
+	case <-cancel:
+		fmt.Println()
+		return false
+	}
+}
+
+func listPaired(k keys) error {
+	peers, err := k.peers.List()
+	if err != nil {
+		return err
+	}
+	if len(peers) == 0 {
+		fmt.Println("No receiver is paired with this PC.")
+	}
+	for _, p := range peers {
+		fmt.Printf("%-32s paired %s, key %s\n", p.Name, p.Paired.Local().Format("2006-01-02 15:04"), pairing.Short(p.ID))
+	}
+	return nil
+}
+
+func forget(k keys, args []string) error {
+	if len(args) != 1 {
+		return errors.New(`say which receiver to forget, by name or key as "outloud-send paired" lists them, or "all"`)
+	}
+	gone, err := k.peers.Forget(args[0])
+	if err != nil {
+		return err
+	}
+	for _, p := range gone {
+		fmt.Printf("Forgot %s.\n", p.Name)
+	}
+	if len(gone) == 0 && args[0] != "all" {
+		return fmt.Errorf("no paired receiver is called %q", args[0])
+	}
 	return nil
 }
 

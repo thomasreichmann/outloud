@@ -47,7 +47,7 @@ if [ "${1:-}" = release ]; then
 	fi
 	cp "$out"/mac/outloud-receiver-darwin-* "$rel/"
 	cp "$out/install.ps1" "$rel/install-windows.ps1"
-	sed "s#__BASE__#$base#" internal/macsetup/install.sh > "$rel/install-mac.sh"
+	sed "s#__BASE__#$base#; s#__PIN__##" internal/macsetup/install.sh > "$rel/install-mac.sh"
 	(cd "$rel" && sha256sum -- * > SHA256SUMS)
 	ls -l "$rel"
 else

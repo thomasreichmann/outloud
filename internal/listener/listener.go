@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thomasreichmann/outloud/internal/pairing"
 	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/receiver"
@@ -25,6 +26,7 @@ type Status struct {
 	State    sender.State
 	Receiver string // the receiver's name
 	Software string // the receiver's software and version
+	PeerID   string // the ID of the receiver's key
 	Addr     string
 	Err      error // why the connection failed
 }
@@ -32,8 +34,12 @@ type Status struct {
 type Listener struct {
 	Target sender.Target
 	// Name is shown on the receiver.
-	Name    string
-	Playout *playout.Playout
+	Name string
+	// Identity is this device's key, and Peers the receivers paired with
+	// it; the receiver must be one of them.
+	Identity *pairing.Identity
+	Peers    *pairing.Store
+	Playout  *playout.Playout
 	// Latency is the amount of audio to buffer.
 	Latency time.Duration
 	Log     *log.Logger
@@ -60,7 +66,8 @@ func (l *Listener) update(st Status) {
 	}
 }
 
-// Run listens until ctx is cancelled.
+// Run listens until ctx is cancelled. Like sender.Sender.Run, it gives up
+// only if the receiver and this device are not paired.
 func (l *Listener) Run(ctx context.Context) error {
 	backoff := time.Second
 	for {
@@ -78,6 +85,9 @@ func (l *Listener) Run(ctx context.Context) error {
 			backoff = time.Second
 		}
 		l.update(Status{State: sender.Disconnected, Addr: addr, Err: err})
+		if errors.Is(err, pairing.ErrNotPaired) {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -88,20 +98,20 @@ func (l *Listener) Run(ctx context.Context) error {
 }
 
 func (l *Listener) session(ctx context.Context, addr string) error {
-	conn, rd, peer, err := sender.Dial(ctx, addr, proto.Hello{Name: l.Name, Listen: true})
+	c, err := sender.Dial(ctx, addr, proto.Hello{Name: l.Name, Listen: true}, l.Identity, l.Peers)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer c.Close()
+	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()
 
 	l.Playout.Reset()
 	l.Playout.SetTarget(l.Latency)
 	defer l.Playout.Idle()
-	l.update(Status{State: sender.Connected, Receiver: peer.Name, Software: peer.Software, Addr: addr})
-	err = receiver.Play(conn, rd, l.Playout, func() bool { return true }, func(msg string) {
-		l.Log.Printf("%s: %s", peer.Name, msg)
+	l.update(Status{State: sender.Connected, Receiver: c.Peer.Name, Software: c.Peer.Software, PeerID: c.PeerID, Addr: addr})
+	err = receiver.Play(c, c.Reader, l.Playout, func() bool { return true }, func(msg string) {
+		l.Log.Printf("%s: %s", c.Peer.Name, msg)
 	})
 	switch {
 	case ctx.Err() != nil:

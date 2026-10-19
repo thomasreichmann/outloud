@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/thomasreichmann/outloud/internal/listener"
 	"github.com/thomasreichmann/outloud/internal/macsetup"
 	"github.com/thomasreichmann/outloud/internal/mdns"
+	"github.com/thomasreichmann/outloud/internal/pairing"
 	"github.com/thomasreichmann/outloud/internal/playback"
 	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/proto"
@@ -68,19 +70,28 @@ type app struct {
 	log      *log.Logger
 	logPath  string
 	hostname string
+	// id is this PC's key, and peers the Macs paired with it.
+	id    *pairing.Identity
+	peers *pairing.Store
 
-	mu        sync.Mutex
-	cfg       Config
-	firstRun  bool
-	found     []mdns.Service
-	speakers  []speaker // what the speaker items currently show
-	devices   []wasapi.Device
-	status    sender.Status
-	light     bool
-	icons     icons
-	shown     []byte // the icon currently set
-	setupCmd  string
-	setupStop context.CancelFunc
+	// pairMu is held while pairing; lastPair is how the last one went.
+	pairMu   sync.Mutex
+	lastPair pairResult
+
+	mu          sync.Mutex
+	pairingWith string         // the Mac being paired with, for the status
+	paired      []pairing.Peer // what the paired items currently show
+	cfg         Config
+	firstRun    bool
+	found       []mdns.Service
+	speakers    []speaker // what the speaker items currently show
+	devices     []wasapi.Device
+	status      sender.Status
+	light       bool
+	icons       icons
+	shown       []byte // the icon currently set
+	setupCmd    string
+	setupStop   context.CancelFunc
 
 	hearable   []speaker // what the hear items currently show
 	hearStatus listener.Status
@@ -105,6 +116,8 @@ type app struct {
 	mDevices    []*systray.MenuItem
 	mVolume     *systray.MenuItem
 	mAutostart  *systray.MenuItem
+	mPaired     []*systray.MenuItem
+	mNoPaired   *systray.MenuItem
 }
 
 func main() {
@@ -115,6 +128,13 @@ func main() {
 	a := &app{}
 	a.log, a.logPath = openLog()
 	a.hostname, _ = os.Hostname()
+	var err error
+	if a.id, err = pairing.LoadIdentity(dataDir("APPDATA")); err != nil {
+		a.log.Printf("loading this PC's key: %v", err)
+		messageBox("Outloud", "Outloud cannot start: loading this PC's key failed.\n\n"+err.Error(), mbWarning)
+		return
+	}
+	a.peers = pairing.OpenStore(dataDir("APPDATA"))
 	var existed bool
 	a.cfg, existed = loadConfig()
 	a.firstRun = !existed
@@ -212,7 +232,16 @@ func (a *app) ready() {
 	onClick(a.mAutostart, a.toggleAutostart)
 	systray.AddSeparator()
 
-	setup := systray.AddMenuItem("Set up a Mac…", "Install the receiver on a Mac on this network")
+	pairedMenu := systray.AddMenuItem("Paired Macs", "The Macs this PC can use")
+	for i := range maxSpeakers {
+		mi := pairedMenu.AddSubMenuItem("", "It has to pair again to be used")
+		mi.Hide()
+		a.mPaired = append(a.mPaired, mi)
+		onClick(mi, func() { a.forgetMac(i) })
+	}
+	a.mNoPaired = pairedMenu.AddSubMenuItem("None yet: choose a Mac above to pair", "")
+	a.mNoPaired.Disable()
+	setup := systray.AddMenuItem("Set up a Mac…", "Install the receiver on a Mac on this network, and pair with it")
 	onClick(setup, a.setupMac)
 	logItem := systray.AddMenuItem("Open log", "")
 	onClick(logItem, func() { openFile(a.logPath) })
@@ -269,6 +298,8 @@ func (a *app) restart() {
 		Source:        &wasapi.Loopback{Device: cfg.Device, ExcludeSelf: a.hearingOn},
 		Target:        sender.Target{Name: cfg.Receiver, Addr: cfg.Address},
 		Name:          a.hostname,
+		Identity:      a.id,
+		Peers:         a.peers,
 		Latency:       time.Duration(cfg.LatencyMs) * time.Millisecond,
 		ForwardVolume: cfg.ForwardVolume,
 		OnStatus:      a.onStatus,
@@ -316,6 +347,8 @@ func (a *app) restartHear() {
 	l := &listener.Listener{
 		Target:   sender.Target{Name: cfg.Hear, Addr: cfg.HearAddress},
 		Name:     a.hostname,
+		Identity: a.id,
+		Peers:    a.peers,
 		Playout:  p,
 		Latency:  time.Duration(cfg.LatencyMs) * time.Millisecond,
 		Log:      a.log,
@@ -412,7 +445,13 @@ func (a *app) chooseSpeaker(i int) {
 		return
 	}
 	s := a.speakers[i]
+	// Choosing the current speaker again retries at once.
+	again := s.name == a.cfg.Receiver && s.addr == a.cfg.Address && a.status.State != sender.Connected
 	a.mu.Unlock()
+	if again {
+		a.restart()
+		return
+	}
 	a.update(func(c *Config) { c.Receiver, c.Address = s.name, s.addr })
 }
 
@@ -478,7 +517,14 @@ func (a *app) setupMac() {
 	cmd := a.setupCmd
 	if cmd == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), setupFor)
-		c, err := macsetup.Serve(ctx, macsetup.DefaultPort, a.log.Printf)
+		s := &macsetup.Server{
+			Port: macsetup.DefaultPort, Identity: a.id, Peers: a.peers, Name: a.hostname, Logf: a.log.Printf,
+			OnPaired: func(p pairing.Peer) {
+				a.log.Printf("set up %q, which is now paired", p.Name)
+				a.refreshMenu()
+			},
+		}
+		c, err := s.Serve(ctx)
 		if err != nil {
 			cancel()
 			a.mu.Unlock()
@@ -494,11 +540,13 @@ func (a *app) setupMac() {
 	}
 	a.mu.Unlock()
 
-	msg := "On the Mac, open Terminal (in Applications > Utilities) and run:\n\n    " + cmd + "\n\n"
+	msg := "On the Mac, open Terminal (in Applications > Utilities) and run:\n\n" + cmd + "\n\n"
 	if setClipboard(cmd) == nil {
-		msg += "(The command is also on this PC's clipboard.)\n\n"
+		msg += "The command is on this PC's clipboard. It is long, so it is easiest to send it " +
+			"to the Mac, for example in a message to yourself, and paste it there.\n\n"
 	}
-	msg += "It downloads the receiver from this PC and sets it to start at every login. " +
+	msg += "It downloads the receiver from this PC, checking that it really comes from this PC, " +
+		"sets it to start at every login and pairs the Mac with this PC. " +
 		"The Mac then appears under Speakers in this menu.\n\n" +
 		"If Windows asks whether Outloud may use the network, allow it on private networks. " +
 		"The installer stays available for 30 minutes."
@@ -516,6 +564,15 @@ func (a *app) onStatus(st sender.Status) {
 	}
 	a.mu.Unlock()
 
+	if st.State == sender.Disconnected && errors.Is(st.Err, pairing.ErrNotPaired) {
+		a.log.Printf("not connected: %v", st.Err)
+		a.mu.Lock()
+		name := a.cfg.Receiver
+		a.mu.Unlock()
+		go a.pairFor(toMac, name, st.Addr)
+		a.refreshStatus()
+		return
+	}
 	switch {
 	case st.State != prev.State && st.State == sender.Connected:
 		a.log.Printf("connected to %q at %s (%s)", st.Receiver, st.Addr, st.Software)
@@ -541,6 +598,15 @@ func (a *app) onHearStatus(st listener.Status) {
 	}
 	a.mu.Unlock()
 
+	if st.State == sender.Disconnected && errors.Is(st.Err, pairing.ErrNotPaired) {
+		a.log.Printf("not hearing: %v", st.Err)
+		a.mu.Lock()
+		name := a.cfg.Hear
+		a.mu.Unlock()
+		go a.pairFor(fromMac, name, st.Addr)
+		a.refreshStatus()
+		return
+	}
 	switch {
 	case st.State != prev.State && st.State == sender.Connected:
 		a.log.Printf("hearing %q at %s (%s)", st.Receiver, st.Addr, st.Software)
@@ -569,10 +635,26 @@ func (a *app) refreshStatus() {
 		name = cfg.Address
 	}
 
+	// problem describes a connection that failed for a reason the user can
+	// act on.
+	problem := func(err error, name string) string {
+		switch {
+		case errors.Is(err, pairing.ErrNotPaired) && a.pairingWith != "":
+			return "Pairing with " + name + ": compare the codes"
+		case errors.Is(err, pairing.ErrNotPaired):
+			return "Not paired with " + name
+		case errors.Is(err, sender.ErrOutdated):
+			return name + " runs an older Outloud: set it up again"
+		}
+		return ""
+	}
+
 	text, icon := "", a.icons.off
 	switch {
 	case !cfg.streaming():
 		text = "Not streaming: choose a speaker"
+	case st.State == sender.Disconnected && problem(st.Err, name) != "":
+		text = problem(st.Err, name)
 	case st.State == sender.Connected && st.Err != nil:
 		text, icon = "Connected to "+name+", but "+st.Err.Error(), a.icons.connected
 	case st.State == sender.Connected && st.Playing:
@@ -604,6 +686,8 @@ func (a *app) refreshStatus() {
 			if !cfg.streaming() || st.State != sender.Connected {
 				icon = a.icons.connected
 			}
+		case hs.State == sender.Disconnected && problem(hs.Err, name) != "":
+			text = problem(hs.Err, name)
 		case hs.State == sender.Disconnected && hs.Err != nil:
 			text = "Cannot reach " + name + " to hear it, retrying"
 		default:
@@ -629,10 +713,17 @@ func (a *app) refreshMenu() {
 	defer a.mu.Unlock()
 	cfg := a.cfg
 
+	// Receivers that speak an older protocol need updating before use.
+	label := func(s mdns.Service) string {
+		if !slices.Contains(s.TXT, proto.VersionTXT) {
+			return s.Instance + " (needs update)"
+		}
+		return s.Instance
+	}
 	var list []speaker
 	listed := false
 	for _, s := range a.found {
-		list = append(list, speaker{label: s.Instance, name: s.Instance, addr: s.Addr()})
+		list = append(list, speaker{label: label(s), name: s.Instance, addr: s.Addr()})
 		listed = listed || strings.EqualFold(s.Instance, cfg.Receiver)
 	}
 	switch {
@@ -672,7 +763,7 @@ func (a *app) refreshMenu() {
 	listed = false
 	for _, s := range a.found {
 		if slices.Contains(s.TXT, proto.CaptureTXT) {
-			hear = append(hear, speaker{label: s.Instance, name: s.Instance, addr: s.Addr()})
+			hear = append(hear, speaker{label: label(s), name: s.Instance, addr: s.Addr()})
 			listed = listed || strings.EqualFold(s.Instance, cfg.Hear)
 		}
 	}
@@ -694,6 +785,25 @@ func (a *app) refreshMenu() {
 		a.mNoHear.Show()
 	} else {
 		a.mNoHear.Hide()
+	}
+
+	paired, err := a.peers.List()
+	if err != nil {
+		a.log.Printf("reading the paired Macs: %v", err)
+	}
+	a.paired = paired[:min(len(paired), maxSpeakers)]
+	for i, mi := range a.mPaired {
+		if i >= len(a.paired) {
+			mi.Hide()
+			continue
+		}
+		mi.SetTitle("Forget " + a.paired[i].Name + "…")
+		mi.Show()
+	}
+	if len(a.paired) == 0 {
+		a.mNoPaired.Show()
+	} else {
+		a.mNoPaired.Hide()
 	}
 
 	for i, l := range latencies {

@@ -3,6 +3,7 @@ package listener_test
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"math"
@@ -11,11 +12,26 @@ import (
 	"time"
 
 	"github.com/thomasreichmann/outloud/internal/listener"
+	"github.com/thomasreichmann/outloud/internal/pairing"
 	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/receiver"
 	"github.com/thomasreichmann/outloud/internal/sender"
 	"github.com/thomasreichmann/outloud/internal/source"
 )
+
+// paired makes keys for a PC and a receiver that are paired with each
+// other, and the receiver's list of paired devices.
+func paired(t *testing.T) (pc, mac *pairing.Identity, pcPeers, macPeers *pairing.Store) {
+	t.Helper()
+	var err error
+	if pc, err = pairing.NewIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if mac, err = pairing.NewIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	return pc, mac, pairing.MemoryStore(pairing.Peer{ID: mac.ID}), pairing.MemoryStore(pairing.Peer{ID: pc.ID})
+}
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
@@ -47,21 +63,30 @@ func TestBothDirections(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
+	pc, mac, pcPeers, macPeers := paired(t)
 	srv := &receiver.Server{
-		Name:    "test receiver",
-		Playout: remote,
-		Capture: source.Tone{Freq: 660, Gain: 0.25},
-		Log:     log.New(io.Discard, "", 0),
+		Name:     "test receiver",
+		Playout:  remote,
+		Capture:  source.Tone{Freq: 660, Gain: 0.25},
+		Identity: mac,
+		Peers:    macPeers,
+		Log:      log.New(io.Discard, "", 0),
 	}
 	go srv.Serve(l)
 	target := sender.Target{Addr: l.Addr().String()}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := &sender.Sender{Source: source.Tone{Freq: 440, Gain: 0.5}, Target: target, Name: "pc", Latency: 40 * time.Millisecond}
+	s := &sender.Sender{
+		Source: source.Tone{Freq: 440, Gain: 0.5}, Target: target, Name: "pc", Latency: 40 * time.Millisecond,
+		Identity: pc, Peers: pcPeers,
+	}
 	go s.Run(ctx)
 	local := playout.New(playout.Config{OutputRate: 48000, Target: 40 * time.Millisecond})
-	ln := &listener.Listener{Target: target, Name: "pc", Playout: local, Latency: 40 * time.Millisecond, Log: log.New(io.Discard, "", 0)}
+	ln := &listener.Listener{
+		Target: target, Name: "pc", Identity: pc, Peers: pcPeers,
+		Playout: local, Latency: 40 * time.Millisecond, Log: log.New(io.Discard, "", 0),
+	}
 	go ln.Run(ctx)
 
 	waitFor(t, "listener to connect", func() bool { return ln.Status().State == sender.Connected })
@@ -91,15 +116,19 @@ func TestNoCapture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	srv := &receiver.Server{Name: "old", Playout: remote, Log: log.New(io.Discard, "", 0)}
+	pc, mac, pcPeers, macPeers := paired(t)
+	srv := &receiver.Server{Name: "no capture", Playout: remote, Identity: mac, Peers: macPeers, Log: log.New(io.Discard, "", 0)}
 	go srv.Serve(l)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ln := &listener.Listener{Target: sender.Target{Addr: l.Addr().String()}, Playout: remote, Latency: 40 * time.Millisecond, Log: log.New(io.Discard, "", 0)}
+	ln := &listener.Listener{
+		Target: sender.Target{Addr: l.Addr().String()}, Identity: pc, Peers: pcPeers,
+		Playout: remote, Latency: 40 * time.Millisecond, Log: log.New(io.Discard, "", 0),
+	}
 	go ln.Run(ctx)
 	waitFor(t, "a refusal", func() bool {
 		st := ln.Status()
-		return st.State == sender.Disconnected && st.Err != nil
+		return st.State == sender.Disconnected && errors.Is(st.Err, sender.ErrNoCapture)
 	})
 }

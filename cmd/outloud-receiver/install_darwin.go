@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thomasreichmann/outloud/internal/macsetup"
+	"github.com/thomasreichmann/outloud/internal/pairing"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/version"
 )
@@ -92,6 +95,14 @@ func install(args []string) error {
 	if err := os.WriteFile(p.plist, plist(append([]string{p.binary}, args...), p.log), 0o644); err != nil {
 		return err
 	}
+	// The installer that a PC serves names it and pins its key.
+	pc := ""
+	if pin := os.Getenv("OUTLOUD_SETUP_PIN"); pin != "" {
+		if pc, err = joinPC(p.dir, os.Getenv("OUTLOUD_SETUP"), pin, args); err != nil {
+			fmt.Printf("warning: could not pair with the PC this came from (%v).\n"+
+				"Choose this Mac in Outloud's menu on the PC to pair by comparing a code instead.\n", err)
+		}
+	}
 
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	_ = exec.Command("launchctl", "bootout", domain+"/"+agentLabel).Run()
@@ -108,6 +119,12 @@ func install(args []string) error {
 	}
 	fmt.Printf("Installed %s. The receiver is running now and starts at every login.\n  app: %s\n  log: %s\n",
 		version.String(), p.app, p.log)
+	if pc != "" {
+		fmt.Printf("\nPaired with %s, which can now use this Mac.\n", pc)
+	} else {
+		fmt.Printf("\nThe first time a PC connects, this Mac asks whether to pair with it. Allow\n" +
+			"it if the PC shows the same code.\n")
+	}
 	fmt.Printf("\nIf macOS asks whether Outloud may accept incoming connections or use the\n" +
 		"local network, allow it. When a PC first listens to this Mac, macOS asks\n" +
 		"whether Outloud may record this Mac's sound; allow that too.\n")
@@ -126,7 +143,7 @@ func uninstall() error {
 	}
 	_ = exec.Command("launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid())+"/"+agentLabel).Run()
 	var errs []error
-	for _, f := range []string{p.plist, p.link} {
+	for _, f := range []string{p.plist, p.link, filepath.Join(p.dir, pairing.IdentityFile), filepath.Join(p.dir, pairing.StoreFile), socketPath()} {
 		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
@@ -140,6 +157,40 @@ func uninstall() error {
 	}
 	fmt.Println("Uninstalled.")
 	return nil
+}
+
+// joinPC pairs this Mac with the PC whose installer is running, at base
+// with key pin, and returns the PC's name. args are the receiver's flags,
+// which may name this Mac.
+func joinPC(dir, base, pin string, args []string) (string, error) {
+	id, err := pairing.LoadIdentity(dir)
+	if err != nil {
+		return "", err
+	}
+	name := flagValue(args, "name")
+	if name == "" {
+		name = computerName()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return macsetup.Join(ctx, base, pin, name, id, pairing.OpenStore(dir))
+}
+
+// flagValue finds the value of the flag called name among args.
+func flagValue(args []string, name string) string {
+	for i, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		a = strings.TrimLeft(a, "-")
+		if v, ok := strings.CutPrefix(a, name+"="); ok {
+			return v
+		}
+		if a == name && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func plist(args []string, logPath string) []byte {

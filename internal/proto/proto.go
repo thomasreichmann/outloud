@@ -2,10 +2,13 @@
 // receiver that plays the audio.
 //
 // A sender opens a TCP connection to the receiver and both sides start by
-// writing the 4-byte Magic. Everything after that is a stream of messages:
-// either the sender streams audio to the receiver, or, when its Hello asks to
-// listen, the receiver streams its own sound back with the same messages and
-// the sender plays it.
+// writing the 4-byte Magic. Then comes TLS, in which each side proves it
+// holds its own key (see package pairing), and inside it both sides exchange
+// a Hello. Everything after that is a stream of messages: either the sender
+// streams audio to the receiver, or, when its Hello asks to listen, the
+// receiver streams its own sound back with the same messages and the sender
+// plays it. A Hello that asks to pair is followed by the pairing exchange
+// instead.
 //
 //	type   uint8
 //	length uint32, little endian
@@ -22,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 )
 
 const (
@@ -30,9 +34,12 @@ const (
 	// DefaultPort is the TCP port receivers listen on.
 	DefaultPort = 47811
 	// Magic opens every connection, in both directions.
-	Magic = "OUT1"
+	Magic = "OUT2"
+	// MagicV1 opened connections in protocol version 1, which had no TLS.
+	// A receiver still recognises it, to tell such a sender to update.
+	MagicV1 = "OUT1"
 	// Version is bumped on incompatible protocol changes.
-	Version = 1
+	Version = 2
 	// MaxPayload bounds a single message so a corrupt stream cannot make
 	// the reader allocate unbounded memory.
 	MaxPayload = 1 << 20
@@ -59,6 +66,13 @@ const (
 	// MsgStats carries JSON Stats, written every second by the side playing
 	// the audio.
 	MsgStats MsgType = 7
+	// The pairing exchange: the sender's commitment to its nonce, the
+	// receiver's nonce, the sender's nonce, and each side's decision, one
+	// byte that is 1 for yes. See package pairing.
+	MsgPairCommit   MsgType = 8
+	MsgPairNonce    MsgType = 9
+	MsgPairReveal   MsgType = 10
+	MsgPairDecision MsgType = 11
 )
 
 func (t MsgType) String() string {
@@ -77,6 +91,14 @@ func (t MsgType) String() string {
 		return "ping"
 	case MsgStats:
 		return "stats"
+	case MsgPairCommit:
+		return "pair commit"
+	case MsgPairNonce:
+		return "pair nonce"
+	case MsgPairReveal:
+		return "pair reveal"
+	case MsgPairDecision:
+		return "pair decision"
 	}
 	return fmt.Sprintf("msg(%d)", uint8(t))
 }
@@ -92,14 +114,35 @@ type Hello struct {
 	LatencyMs int `json:"latency_ms,omitempty"`
 	// Listen asks the receiver to stream the sound it plays itself, instead
 	// of receiving audio. Only receivers whose TXT record has CaptureTXT
-	// support it; older ones would take it for a sender. Only meaningful
-	// from the sender.
+	// support it. Only meaningful from the sender.
 	Listen bool `json:"listen,omitempty"`
+	// Pair asks the receiver to pair with the sender, which it does whether
+	// or not they are paired already. Only meaningful from the sender.
+	Pair bool `json:"pair,omitempty"`
+	// Refused, from the receiver, says why it turned the sender away: one
+	// of the Refused constants. The receiver closes the connection after.
+	Refused string `json:"refused,omitempty"`
 }
+
+// Reasons a receiver turns a sender away.
+const (
+	// RefusedNotPaired: the receiver has not paired with the sender.
+	RefusedNotPaired = "not paired"
+	// RefusedNoCapture: the sender wants to listen, and the receiver cannot
+	// capture its sound.
+	RefusedNoCapture = "cannot capture"
+	// RefusedBusy: the sender wants to pair while the receiver is pairing
+	// with someone else, or has just been told no.
+	RefusedBusy = "busy"
+)
 
 // CaptureTXT is in the TXT record of receivers that can stream their own
 // sound to a sender that listens.
 const CaptureTXT = "capture=1"
+
+// VersionTXT is in the TXT record of receivers that speak this protocol
+// version.
+var VersionTXT = "v=" + strconv.Itoa(Version)
 
 // Stats is the playing side's view of the stream, reported back to the side
 // sending it.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,8 @@ var (
 	procEmptyClipboard   = user32.NewProc("EmptyClipboard")
 	procSetClipboardData = user32.NewProc("SetClipboardData")
 	procCloseClipboard   = user32.NewProc("CloseClipboard")
+	procFindWindowW      = user32.NewProc("FindWindowW")
+	procPostMessageW     = user32.NewProc("PostMessageW")
 	procGlobalAlloc      = kernel32.NewProc("GlobalAlloc")
 	procGlobalLock       = kernel32.NewProc("GlobalLock")
 	procGlobalUnlock     = kernel32.NewProc("GlobalUnlock")
@@ -30,18 +33,60 @@ var (
 )
 
 const (
-	runKey    = `Software\Microsoft\Windows\CurrentVersion\Run`
-	runValue  = "Outloud"
-	themeKey  = `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`
-	mbInfo    = 0x40    // MB_ICONINFORMATION
-	mbWarning = 0x30    // MB_ICONWARNING
-	mbFront   = 0x50000 // MB_SETFOREGROUND | MB_TOPMOST
+	runKey     = `Software\Microsoft\Windows\CurrentVersion\Run`
+	runValue   = "Outloud"
+	themeKey   = `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`
+	mbOKCancel = 0x1     // MB_OKCANCEL
+	mbYesNo    = 0x4     // MB_YESNO
+	mbQuestion = 0x20    // MB_ICONQUESTION
+	mbInfo     = 0x40    // MB_ICONINFORMATION
+	mbWarning  = 0x30    // MB_ICONWARNING
+	mbFront    = 0x50000 // MB_SETFOREGROUND | MB_TOPMOST
+	idOK       = 1
+	idYes      = 6
+	wmClose    = 0x10
 )
 
-func messageBox(title, text string, flags uint32) {
+func messageBox(title, text string, flags uint32) int32 {
 	t, _ := windows.UTF16PtrFromString(text)
 	c, _ := windows.UTF16PtrFromString(title)
-	windows.MessageBox(0, t, c, flags|mbFront)
+	r, _ := windows.MessageBox(0, t, c, flags|mbFront)
+	return r
+}
+
+func askYesNo(title, text string) bool {
+	return messageBox(title, text, mbYesNo|mbQuestion) == idYes
+}
+
+// askOKCancel shows a box with OK and Cancel and reports whether OK was
+// clicked. Once cancel is closed it closes the box itself and returns
+// false. title must be unique among open windows, to find the box by.
+func askOKCancel(title, text string, cancel <-chan struct{}) bool {
+	answer := make(chan int32, 1)
+	go func() {
+		// The box belongs to the thread that shows it.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		answer <- messageBox(title, text, mbOKCancel|mbInfo)
+	}()
+	select {
+	case r := <-answer:
+		return r == idOK
+	case <-cancel:
+	}
+	// The box may not be up yet.
+	cls, _ := windows.UTF16PtrFromString("#32770") // the dialog window class
+	t, _ := windows.UTF16PtrFromString(title)
+	for {
+		if h, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(t))); h != 0 {
+			procPostMessageW.Call(h, wmClose, 0, 0)
+		}
+		select {
+		case <-answer:
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func setClipboard(s string) error {
