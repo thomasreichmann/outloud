@@ -130,13 +130,15 @@ func Agree(w io.Writer, rd *proto.Reader, ask func(cancel <-chan struct{}) bool)
 			if !yes {
 				return ErrCancelled
 			}
-			if err != nil {
+			if answered {
 				return err
 			}
-			if answered {
-				return nil
+			// A peer that said no may have hung up before this answer got
+			// there; its no is what happened.
+			if perr := <-peer; perr != nil {
+				return perr
 			}
-			return <-peer
+			return err
 		}
 	}
 }
