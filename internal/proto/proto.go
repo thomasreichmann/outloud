@@ -3,6 +3,9 @@
 //
 // A sender opens a TCP connection to the receiver and both sides start by
 // writing the 4-byte Magic. Everything after that is a stream of messages:
+// either the sender streams audio to the receiver, or, when its Hello asks to
+// listen, the receiver streams its own sound back with the same messages and
+// the sender plays it.
 //
 //	type   uint8
 //	length uint32, little endian
@@ -50,9 +53,11 @@ const (
 	MsgIdle MsgType = 4
 	// MsgVolume carries a Volume to apply on the receiver.
 	MsgVolume MsgType = 5
-	// MsgPing is an empty keepalive the sender writes every second.
+	// MsgPing is an empty keepalive the side sending audio writes every
+	// second.
 	MsgPing MsgType = 6
-	// MsgStats carries JSON Stats, written by the receiver every second.
+	// MsgStats carries JSON Stats, written every second by the side playing
+	// the audio.
 	MsgStats MsgType = 7
 )
 
@@ -85,9 +90,19 @@ type Hello struct {
 	// LatencyMs is the buffer target the sender asks the receiver to use.
 	// Zero means the receiver's default. Only meaningful from the sender.
 	LatencyMs int `json:"latency_ms,omitempty"`
+	// Listen asks the receiver to stream the sound it plays itself, instead
+	// of receiving audio. Only receivers whose TXT record has CaptureTXT
+	// support it; older ones would take it for a sender. Only meaningful
+	// from the sender.
+	Listen bool `json:"listen,omitempty"`
 }
 
-// Stats is the receiver's view of the stream, reported back to the sender.
+// CaptureTXT is in the TXT record of receivers that can stream their own
+// sound to a sender that listens.
+const CaptureTXT = "capture=1"
+
+// Stats is the playing side's view of the stream, reported back to the side
+// sending it.
 type Stats struct {
 	State     string  `json:"state"`
 	BufferMs  float64 `json:"buffer_ms"`

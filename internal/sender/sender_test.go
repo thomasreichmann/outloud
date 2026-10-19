@@ -1,4 +1,4 @@
-package sender
+package sender_test
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/receiver"
+	"github.com/thomasreichmann/outloud/internal/sender"
 	"github.com/thomasreichmann/outloud/internal/source"
 )
 
@@ -40,9 +41,9 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 func TestStreamsToReceiver(t *testing.T) {
 	p, addr := startReceiver(t)
-	s := &Sender{
+	s := &sender.Sender{
 		Source:        source.Tone{Freq: 440, Gain: 0.5},
-		Target:        Target{Addr: addr},
+		Target:        sender.Target{Addr: addr},
 		Name:          "test sender",
 		Latency:       40 * time.Millisecond,
 		ForwardVolume: true,
@@ -51,7 +52,7 @@ func TestStreamsToReceiver(t *testing.T) {
 	defer cancel()
 	go s.Run(ctx)
 
-	waitFor(t, "connection", func() bool { return s.Status().State == Connected })
+	waitFor(t, "connection", func() bool { return s.Status().State == sender.Connected })
 	if st := s.Status(); st.Receiver != "test receiver" {
 		t.Errorf("receiver name %q", st.Receiver)
 	}
@@ -80,17 +81,17 @@ func TestStreamsToReceiver(t *testing.T) {
 
 func TestNewSenderTakesOver(t *testing.T) {
 	_, addr := startReceiver(t)
-	run := func(name string) (*Sender, context.CancelFunc) {
-		s := &Sender{Source: source.Tone{Freq: 440, Gain: 0.1}, Target: Target{Addr: addr}, Name: name}
+	run := func(name string) (*sender.Sender, context.CancelFunc) {
+		s := &sender.Sender{Source: source.Tone{Freq: 440, Gain: 0.1}, Target: sender.Target{Addr: addr}, Name: name}
 		ctx, cancel := context.WithCancel(context.Background())
 		go s.Run(ctx)
 		return s, cancel
 	}
 	first, stop1 := run("first")
 	defer stop1()
-	waitFor(t, "first connection", func() bool { return first.Status().State == Connected })
+	waitFor(t, "first connection", func() bool { return first.Status().State == sender.Connected })
 	second, stop2 := run("second")
 	defer stop2()
-	waitFor(t, "second connection", func() bool { return second.Status().State == Connected })
-	waitFor(t, "first to be dropped", func() bool { return first.Status().State != Connected })
+	waitFor(t, "second connection", func() bool { return second.Status().State == sender.Connected })
+	waitFor(t, "first to be dropped", func() bool { return first.Status().State != sender.Connected })
 }

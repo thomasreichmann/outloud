@@ -8,11 +8,14 @@ import (
 	"time"
 
 	"github.com/thomasreichmann/outloud/internal/playout"
+	"github.com/thomasreichmann/outloud/internal/source"
 )
 
 func startDevice(io.Reader, *playout.Playout, time.Duration) (output, error) {
 	return nil, errors.New("playback is only implemented on macOS; use -null to test")
 }
+
+func systemCapture() (source.Source, string) { return nil, "" }
 
 func computerName() string { return hostName() }
 

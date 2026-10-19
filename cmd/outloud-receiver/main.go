@@ -19,6 +19,7 @@ import (
 	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/receiver"
+	"github.com/thomasreichmann/outloud/internal/source"
 	"github.com/thomasreichmann/outloud/internal/version"
 )
 
@@ -59,7 +60,8 @@ func main() {
        outloud-receiver install [flags]   start at login (macOS LaunchAgent)
        outloud-receiver uninstall
 
-Plays audio streamed from a Windows PC running Outloud. %s.
+Plays audio streamed from a Windows PC running Outloud, and sends this
+computer's own sound to a PC that listens. %s.
 
 Flags:
 `, version.String())
@@ -71,6 +73,7 @@ Flags:
 	deviceBuffer := fs.Duration("device-buffer", 40*time.Millisecond, "CoreAudio buffer; raise it if playback crackles")
 	record := fs.String("record", "", "also write everything played to this WAV file")
 	null := fs.Bool("null", false, "do not open an audio device; consume audio in real time (testing)")
+	capture := fs.String("capture", "system", "what a PC that listens hears: system (this computer's sound, macOS 14.2+), tone (testing) or none")
 	verbose := fs.Bool("v", false, "log buffer statistics every 10 s while playing")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	fs.Parse(os.Args[1:])
@@ -111,12 +114,29 @@ Flags:
 	if err != nil {
 		log.Fatal(err)
 	}
-	stopAdvertising, err := mdns.Advertise(*name, proto.ServiceType, *port, []string{"v=1"})
+	var own source.Source // this computer's sound
+	switch *capture {
+	case "system":
+		var note string
+		if own, note = systemCapture(); own != nil {
+			log.Printf("PCs can listen to this computer's sound (%s)", note)
+		}
+	case "tone":
+		own = source.Tone{Freq: 660, Gain: 0.1}
+	case "none":
+	default:
+		log.Fatalf("unknown -capture %q", *capture)
+	}
+	txt := []string{"v=1"}
+	if own != nil {
+		txt = append(txt, proto.CaptureTXT)
+	}
+	stopAdvertising, err := mdns.Advertise(*name, proto.ServiceType, *port, txt)
 	if err != nil {
 		log.Printf("not advertised on the network (%v); senders need this computer's address", err)
 		stopAdvertising = func() {}
 	}
-	srv := &receiver.Server{Name: *name, Playout: p, Latency: *latency, Log: log.Default()}
+	srv := &receiver.Server{Name: *name, Playout: p, Latency: *latency, Capture: own, Log: log.Default()}
 	go func() {
 		if err := srv.Serve(l); err != nil {
 			log.Fatal(err)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"os"
@@ -13,16 +14,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thomasreichmann/outloud/internal/listener"
 	"github.com/thomasreichmann/outloud/internal/macsetup"
 	"github.com/thomasreichmann/outloud/internal/mdns"
+	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/sender"
 	"github.com/thomasreichmann/outloud/internal/source"
 	"github.com/thomasreichmann/outloud/internal/version"
 )
 
+const outputRate = 48000
+
 const usage = `Usage:
   outloud-send [flags]        stream this PC's audio to a receiver
+  outloud-send listen [flags] play a receiver's own sound on this PC
   outloud-send list           find receivers on the network
   outloud-send devices        list playback devices
   outloud-send meter [flags]  show the level being captured, without sending
@@ -64,6 +70,8 @@ func main() {
 	switch cmd {
 	case "":
 		err = stream(ctx, src, parseTarget(*to), *latency, *followVolume, *verbose)
+	case "listen":
+		err = listen(ctx, parseTarget(*to), *latency, *verbose)
 	case "list":
 		err = list(ctx, *browseType)
 	case "devices":
@@ -150,6 +158,64 @@ func stream(ctx context.Context, src source.Source, target sender.Target, latenc
 	return s.Run(ctx)
 }
 
+func listen(ctx context.Context, target sender.Target, latency time.Duration, verbose bool) error {
+	var wake func()
+	p := playout.New(playout.Config{OutputRate: outputRate, Target: latency, OnWake: func() { wake() }})
+	wake, err := openOutput(p)
+	if err != nil {
+		return fmt.Errorf("opening audio output: %w", err)
+	}
+	go func() {
+		var prev playout.Stats
+		var lastLog time.Time
+		for range time.Tick(time.Second) {
+			st := p.Stats()
+			switch {
+			case st.State == playout.Playing && prev.State != playout.Playing:
+				logf("playing (buffer %v)", st.Target)
+			case st.State == playout.Idle && prev.State != playout.Idle:
+				logf("idle")
+			}
+			if st.Underruns > prev.Underruns {
+				logf("buffer ran dry; buffering %v for now", st.Target)
+			}
+			if verbose && st.State != playout.Idle && time.Since(lastLog) >= 5*time.Second {
+				lastLog = time.Now()
+				logf("buffer %.1f/%v, clock correction %+.1f ppm, %d underruns, %d skips",
+					float64(st.Buffered)/float64(time.Millisecond), st.Target, st.DriftPPM, st.Underruns, st.Skips)
+			}
+			prev = st
+		}
+	}()
+
+	name, _ := os.Hostname()
+	var last listener.Status
+	l := &listener.Listener{
+		Target:  target,
+		Name:    name,
+		Playout: p,
+		Latency: latency,
+		Log:     log.New(os.Stdout, "", log.Ltime),
+		OnStatus: func(st listener.Status) {
+			if st.State == last.State && st.Receiver == last.Receiver {
+				return
+			}
+			switch st.State {
+			case sender.Connecting:
+				logf("looking for %s ...", orDefault(target.Name+target.Addr, "a receiver"))
+			case sender.Connected:
+				logf("listening to %q at %s (%s)", st.Receiver, st.Addr, st.Software)
+			case sender.Disconnected:
+				if st.Err != nil {
+					logf("not connected: %v (retrying)", st.Err)
+				}
+			}
+			last = st
+		},
+	}
+	return l.Run(ctx)
+}
+
 func list(ctx context.Context, service string) error {
 	svcs, err := mdns.Browse(ctx, service, 2*time.Second)
 	if err != nil {
@@ -160,7 +226,7 @@ func list(ctx context.Context, service string) error {
 		return nil
 	}
 	for _, s := range svcs {
-		fmt.Printf("%-32s %-22s %s\n", s.Instance, s.Addr(), strings.TrimSuffix(s.Host, "."))
+		fmt.Printf("%-32s %-22s %-28s %s\n", s.Instance, s.Addr(), strings.TrimSuffix(s.Host, "."), strings.Join(s.TXT, " "))
 	}
 	return nil
 }

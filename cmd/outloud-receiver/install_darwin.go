@@ -20,7 +20,7 @@ import (
 const agentLabel = "io.github.thomasreichmann.outloud"
 
 type paths struct {
-	dir, binary, plist, log string
+	dir, app, binary, link, plist, log string
 }
 
 func installPaths() (paths, error) {
@@ -29,16 +29,22 @@ func installPaths() (paths, error) {
 		return paths{}, err
 	}
 	dir := filepath.Join(home, "Library", "Application Support", "Outloud")
+	app := filepath.Join(dir, "Outloud.app")
 	return paths{
-		dir:    dir,
-		binary: filepath.Join(dir, "outloud-receiver"),
+		dir: dir,
+		// The receiver lives in an app bundle so that macOS can ask for
+		// permission to record system audio on its behalf: that needs a
+		// bundle identifier and a usage description.
+		app:    app,
+		binary: filepath.Join(app, "Contents", "MacOS", "outloud-receiver"),
+		link:   filepath.Join(dir, "outloud-receiver"),
 		plist:  filepath.Join(home, "Library", "LaunchAgents", agentLabel+".plist"),
 		log:    filepath.Join(home, "Library", "Logs", "Outloud.log"),
 	}, nil
 }
 
-// install copies this binary to Application Support and registers a
-// LaunchAgent that runs it at login, with args as its flags.
+// install copies this binary into an app bundle in Application Support and
+// registers a LaunchAgent that runs it at login, with args as its flags.
 func install(args []string) error {
 	p, err := installPaths()
 	if err != nil {
@@ -51,7 +57,7 @@ func install(args []string) error {
 	if self, err = filepath.EvalSymlinks(self); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(p.dir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p.binary), 0o755); err != nil {
 		return err
 	}
 	if self != p.binary {
@@ -63,6 +69,22 @@ func install(args []string) error {
 		if err := os.Rename(p.binary+".new", p.binary); err != nil {
 			return err
 		}
+	}
+	if err := os.WriteFile(filepath.Join(p.app, "Contents", "Info.plist"), infoPlist(), 0o644); err != nil {
+		return err
+	}
+	// Sign the bundle as a whole (ad hoc), which binds the Info.plist to the
+	// binary; macOS then knows the receiver as Outloud in its privacy
+	// settings.
+	if out, err := exec.Command("/usr/bin/codesign", "--force", "--sign", "-", p.app).CombinedOutput(); err != nil {
+		fmt.Printf("warning: signing %s: %v: %s\n", p.app, err, bytes.TrimSpace(out))
+	}
+	// The plain path, which earlier versions installed to, stays usable.
+	if err := os.Remove(p.link); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Symlink(p.binary, p.link); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(p.plist), 0o755); err != nil {
 		return err
@@ -84,15 +106,16 @@ func install(args []string) error {
 	if err != nil {
 		return fmt.Errorf("launchctl bootstrap: %v: %s", err, bytes.TrimSpace(out))
 	}
-	fmt.Printf("Installed %s. The receiver is running now and starts at every login.\n  binary: %s\n  log:    %s\n",
-		version.String(), p.binary, p.log)
-	fmt.Printf("\nIf macOS asks whether outloud-receiver may accept incoming connections or\n" +
-		"use the local network, allow it.\n")
+	fmt.Printf("Installed %s. The receiver is running now and starts at every login.\n  app: %s\n  log: %s\n",
+		version.String(), p.app, p.log)
+	fmt.Printf("\nIf macOS asks whether Outloud may accept incoming connections or use the\n" +
+		"local network, allow it. When a PC first listens to this Mac, macOS asks\n" +
+		"whether Outloud may record this Mac's sound; allow that too.\n")
 	if a := addresses(proto.DefaultPort); len(a) > 0 {
 		fmt.Printf("If this Mac does not appear among the PC's speakers, use \"Connect by address\"\n"+
 			"there with: %s\n", strings.Join(a, " or "))
 	}
-	fmt.Printf("To uninstall: %q uninstall\n", p.binary)
+	fmt.Printf("To uninstall: %q uninstall\n", p.link)
 	return nil
 }
 
@@ -103,10 +126,13 @@ func uninstall() error {
 	}
 	_ = exec.Command("launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid())+"/"+agentLabel).Run()
 	var errs []error
-	for _, f := range []string{p.plist, p.binary} {
+	for _, f := range []string{p.plist, p.link} {
 		if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
+	}
+	if err := os.RemoveAll(p.app); err != nil {
+		errs = append(errs, err)
 	}
 	_ = os.Remove(p.dir) // only if empty
 	if err := errors.Join(errs...); err != nil {
@@ -151,6 +177,35 @@ func plist(args []string, logPath string) []byte {
 </plist>
 `)
 	return b.Bytes()
+}
+
+func infoPlist() []byte {
+	v := strings.TrimPrefix(version.Version, "v")
+	return []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>` + agentLabel + `</string>
+	<key>CFBundleName</key>
+	<string>Outloud</string>
+	<key>CFBundleExecutable</key>
+	<string>outloud-receiver</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>` + v + `</string>
+	<key>CFBundleVersion</key>
+	<string>` + v + `</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Outloud sends this Mac's sound to a PC that asks to listen to it.</string>
+</dict>
+</plist>
+`)
 }
 
 func copyFile(from, to string) error {

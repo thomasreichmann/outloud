@@ -167,37 +167,63 @@ func (s *Sender) Run(ctx context.Context) error {
 	}
 }
 
-// session runs one connection until it fails or ctx is done.
-func (s *Sender) session(ctx context.Context, addr string) error {
+// Dial connects to the receiver at addr and exchanges Hellos. The version
+// and software of hello are filled in.
+func Dial(ctx context.Context, addr string, hello proto.Hello) (net.Conn, *proto.Reader, proto.Hello, error) {
 	d := net.Dialer{Timeout: dialTimeout, KeepAlive: 5 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return err
+		return nil, nil, proto.Hello{}, err
 	}
-	defer conn.Close()
-
+	fail := func(err error) (net.Conn, *proto.Reader, proto.Hello, error) {
+		conn.Close()
+		return nil, nil, proto.Hello{}, err
+	}
 	_ = conn.SetDeadline(time.Now().Add(handshakeWait))
 	if err := proto.WriteMagic(conn); err != nil {
-		return err
+		return fail(err)
 	}
-	hello := proto.Hello{Version: proto.Version, Name: s.Name, Software: version.String(), LatencyMs: int(s.Latency / time.Millisecond)}
+	hello.Version, hello.Software = proto.Version, version.String()
 	if err := proto.WriteJSON(conn, proto.MsgHello, hello); err != nil {
-		return err
+		return fail(err)
 	}
 	br := bufio.NewReader(conn)
 	if err := proto.ReadMagic(br); err != nil {
-		return fmt.Errorf("%s: %w", addr, err)
+		return fail(fmt.Errorf("%s: %w", addr, err))
 	}
 	rd := proto.NewReader(br)
 	peer, err := rd.ReadHello()
 	if err != nil {
-		return fmt.Errorf("%s: %w", addr, err)
+		return fail(fmt.Errorf("%s: %w", addr, err))
 	}
 	_ = conn.SetDeadline(time.Time{})
+	return conn, rd, peer, nil
+}
+
+// session runs one connection until it fails or ctx is done.
+func (s *Sender) session(ctx context.Context, addr string) error {
+	conn, rd, peer, err := Dial(ctx, addr, proto.Hello{Name: s.Name, LatencyMs: int(s.Latency / time.Millisecond)})
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
 	s.update(func(st *Status) {
 		*st = Status{State: Connected, Receiver: peer.Name, Software: peer.Software, Addr: addr}
 	})
+	return s.stream(ctx, conn, rd)
+}
 
+// Stream sends src over conn, whose handshake is done, until ctx is done,
+// the connection fails or src stops; rd reads the peer's messages. This is
+// how a receiver sends its own sound to a sender that listens. onStatus, if
+// set, sees capture problems and the peer's stats.
+func Stream(ctx context.Context, conn net.Conn, rd *proto.Reader, src source.Source, onStatus func(Status)) error {
+	s := &Sender{Source: src, OnStatus: onStatus}
+	s.status.State = Connected
+	return s.stream(ctx, conn, rd)
+}
+
+func (s *Sender) stream(ctx context.Context, conn net.Conn, rd *proto.Reader) error {
 	// Capture runs only while connected. Audio is dropped rather than
 	// queued without bound if the network stalls; control events are rare
 	// and must not be lost, so they wait for room.

@@ -23,9 +23,24 @@ type Config struct {
 	Device        string `json:"device,omitempty"`
 	LatencyMs     int    `json:"latency_ms"`
 	ForwardVolume bool   `json:"forward_volume"`
+	// Hear is the advertised name of a speaker whose own sound plays on
+	// this PC, independently of streaming. Empty means off.
+	Hear string `json:"hear,omitempty"`
+	// HearAddress is that speaker's last known address, for when it cannot
+	// be discovered.
+	HearAddress string `json:"hear_address,omitempty"`
 }
 
 func (c Config) streaming() bool { return c.Receiver != "" || c.Address != "" }
+
+func (c Config) hearing() bool { return c.Hear != "" }
+
+// sendPart and hearPart are the settings each direction depends on.
+func (c Config) sendPart() Config {
+	return Config{Receiver: c.Receiver, Address: c.Address, Device: c.Device, LatencyMs: c.LatencyMs, ForwardVolume: c.ForwardVolume}
+}
+
+func (c Config) hearPart() Config { return Config{Hear: c.Hear, LatencyMs: c.LatencyMs} }
 
 func dataDir(env string) string {
 	base := os.Getenv(env)

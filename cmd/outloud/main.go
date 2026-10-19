@@ -1,7 +1,8 @@
 //go:build windows
 
 // Command Outloud is the Windows tray app: it streams whatever this PC plays
-// to a Mac running outloud-receiver, so the Mac works as a wireless speaker.
+// to a Mac running outloud-receiver, so the Mac works as a wireless speaker,
+// and, independently, can play the Mac's own sound on this PC.
 package main
 
 import (
@@ -17,8 +18,11 @@ import (
 
 	"fyne.io/systray"
 
+	"github.com/thomasreichmann/outloud/internal/listener"
 	"github.com/thomasreichmann/outloud/internal/macsetup"
 	"github.com/thomasreichmann/outloud/internal/mdns"
+	"github.com/thomasreichmann/outloud/internal/playback"
+	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/sender"
 	"github.com/thomasreichmann/outloud/internal/version"
@@ -31,6 +35,12 @@ const (
 	browseEvery  = 10 * time.Second
 	devicesEvery = 15 * time.Second
 	setupFor     = 30 * time.Minute
+
+	outputRate = 48000
+	// outputBuffer is the WASAPI buffer for the Mac's sound.
+	outputBuffer = 20 * time.Millisecond
+	// sleepAfter is how long the output stays idle before it is released.
+	sleepAfter = 10 * time.Second
 )
 
 var latencies = []struct {
@@ -72,13 +82,24 @@ type app struct {
 	setupCmd  string
 	setupStop context.CancelFunc
 
+	hearable   []speaker // what the hear items currently show
+	hearStatus listener.Status
+
 	restartMu sync.Mutex
 	running   *run
+	hearing   *run
+	// The Mac's sound plays through out, opened on first use: a process
+	// gets one output.
+	playout *playout.Playout
+	out     *playback.Device
 
 	mStatus     *systray.MenuItem
+	mHearStatus *systray.MenuItem
 	mSpeakers   []*systray.MenuItem
 	mSearching  *systray.MenuItem
 	mStop       *systray.MenuItem
+	mHear       []*systray.MenuItem
+	mNoHear     *systray.MenuItem
 	mLatency    []*systray.MenuItem
 	mDefaultDev *systray.MenuItem
 	mDevices    []*systray.MenuItem
@@ -137,6 +158,9 @@ func (a *app) ready() {
 	title.Disable()
 	a.mStatus = systray.AddMenuItem("Starting…", "")
 	a.mStatus.Disable()
+	a.mHearStatus = systray.AddMenuItem("", "")
+	a.mHearStatus.Disable()
+	a.mHearStatus.Hide()
 	systray.AddSeparator()
 
 	header := systray.AddMenuItem("Speakers", "")
@@ -153,6 +177,18 @@ func (a *app) ready() {
 	onClick(byAddress, a.connectByAddress)
 	a.mStop = systray.AddMenuItem("Stop streaming", "")
 	onClick(a.mStop, a.stopStreaming)
+	systray.AddSeparator()
+
+	hearHeader := systray.AddMenuItem("Hear on this PC", "")
+	hearHeader.Disable()
+	for i := range maxSpeakers {
+		mi := systray.AddMenuItemCheckbox("", "Play this Mac's own sound on this PC", false)
+		mi.Hide()
+		a.mHear = append(a.mHear, mi)
+		onClick(mi, func() { a.toggleHear(i) })
+	}
+	a.mNoHear = systray.AddMenuItem("No Mac on the network shares its sound", "")
+	a.mNoHear.Disable()
 	systray.AddSeparator()
 
 	latency := systray.AddMenuItem("Latency", "How much audio the Mac buffers: less is snappier, more survives a weaker network")
@@ -188,13 +224,16 @@ func (a *app) ready() {
 	go a.discover()
 	go a.watch()
 	a.restart()
+	a.restartHear()
 }
 
 func (a *app) exit() {
 	a.restartMu.Lock()
-	if a.running != nil {
-		a.running.cancel()
-		<-a.running.done
+	for _, r := range []*run{a.running, a.hearing} {
+		if r != nil {
+			r.cancel()
+			<-r.done
+		}
 	}
 	a.restartMu.Unlock()
 	a.mu.Lock()
@@ -244,6 +283,88 @@ func (a *app) restart() {
 	}()
 }
 
+// restartHear stops playing a Mac's sound, if it is, and starts again for
+// the current config.
+func (a *app) restartHear() {
+	a.restartMu.Lock()
+	defer a.restartMu.Unlock()
+	if a.hearing != nil {
+		a.hearing.cancel()
+		<-a.hearing.done
+		a.hearing = nil
+	}
+	a.mu.Lock()
+	cfg := a.cfg
+	a.hearStatus = listener.Status{State: sender.Connecting}
+	a.mu.Unlock()
+	if !cfg.hearing() {
+		a.refreshStatus()
+		return
+	}
+	p, err := a.output()
+	if err != nil {
+		a.log.Printf("opening the audio output: %v", err)
+		a.mu.Lock()
+		a.hearStatus = listener.Status{State: sender.Disconnected, Err: err}
+		a.mu.Unlock()
+		a.refreshStatus()
+		return
+	}
+	a.refreshStatus()
+
+	l := &listener.Listener{
+		Target:   sender.Target{Name: cfg.Hear, Addr: cfg.HearAddress},
+		Name:     a.hostname,
+		Playout:  p,
+		Latency:  time.Duration(cfg.LatencyMs) * time.Millisecond,
+		Log:      a.log,
+		OnStatus: a.onHearStatus,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &run{cancel: cancel, done: make(chan struct{})}
+	a.hearing = r
+	a.log.Printf("hearing %q, latency %d ms", cfg.Hear, cfg.LatencyMs)
+	go func() {
+		defer close(r.done)
+		l.Run(ctx)
+	}()
+}
+
+// output opens the audio output on first use. Called with restartMu held.
+func (a *app) output() (*playout.Playout, error) {
+	if a.playout != nil {
+		return a.playout, nil
+	}
+	var out *playback.Device
+	p := playout.New(playout.Config{OutputRate: outputRate, Target: 80 * time.Millisecond, OnWake: func() { out.Wake() }})
+	out, err := playback.Open(p, p, outputRate, outputBuffer)
+	if err != nil {
+		return nil, err
+	}
+	a.playout, a.out = p, out
+	go a.rest(p, out)
+	return p, nil
+}
+
+// rest releases the output while nothing plays, and logs dropouts.
+func (a *app) rest(p *playout.Playout, out *playback.Device) {
+	idleSince := time.Now()
+	var prev playout.Stats
+	for range time.Tick(time.Second) {
+		st := p.Stats()
+		if st.Underruns > prev.Underruns {
+			a.log.Printf("the Mac's sound ran dry; buffering %v for now", st.Target)
+		}
+		if st.State != playout.Idle {
+			idleSince = time.Now()
+			out.Wake()
+		} else if time.Since(idleSince) >= sleepAfter {
+			out.Sleep()
+		}
+		prev = st
+	}
+}
+
 func targetName(c Config) string {
 	if c.Receiver != "" {
 		return fmt.Sprintf("%q", c.Receiver)
@@ -251,19 +372,23 @@ func targetName(c Config) string {
 	return c.Address
 }
 
-// update changes the config, saves it and restarts streaming if it changed.
+// update changes the config, saves it and restarts each direction whose
+// settings changed.
 func (a *app) update(f func(*Config)) {
 	a.mu.Lock()
 	before := a.cfg
 	f(&a.cfg)
-	changed := a.cfg != before
-	if changed {
+	after := a.cfg
+	if after != before {
 		a.saveLocked()
 	}
 	a.mu.Unlock()
 	a.refreshMenu()
-	if changed {
+	if after.sendPart() != before.sendPart() {
 		a.restart()
+	}
+	if after.hearPart() != before.hearPart() {
+		a.restartHear()
 	}
 }
 
@@ -297,6 +422,24 @@ func (a *app) chooseDevice(i int) {
 
 func (a *app) stopStreaming() {
 	a.update(func(c *Config) { c.Receiver, c.Address = "", "" })
+}
+
+// toggleHear starts or stops playing a Mac's sound on this PC.
+func (a *app) toggleHear(i int) {
+	a.mu.Lock()
+	if i >= len(a.hearable) {
+		a.mu.Unlock()
+		return
+	}
+	s := a.hearable[i]
+	a.mu.Unlock()
+	a.update(func(c *Config) {
+		if strings.EqualFold(c.Hear, s.name) {
+			c.Hear, c.HearAddress = "", ""
+		} else {
+			c.Hear, c.HearAddress = s.name, s.addr
+		}
+	})
 }
 
 func (a *app) connectByAddress() {
@@ -381,6 +524,25 @@ func (a *app) onStatus(st sender.Status) {
 	a.refreshStatus()
 }
 
+func (a *app) onHearStatus(st listener.Status) {
+	a.mu.Lock()
+	prev := a.hearStatus
+	a.hearStatus = st
+	if st.State == sender.Connected && st.Addr != "" && a.cfg.Hear != "" && a.cfg.HearAddress != st.Addr {
+		a.cfg.HearAddress = st.Addr
+		a.saveLocked()
+	}
+	a.mu.Unlock()
+
+	switch {
+	case st.State != prev.State && st.State == sender.Connected:
+		a.log.Printf("hearing %q at %s (%s)", st.Receiver, st.Addr, st.Software)
+	case st.State != prev.State && st.State == sender.Disconnected && st.Err != nil:
+		a.log.Printf("not hearing: %v", st.Err)
+	}
+	a.refreshStatus()
+}
+
 func (a *app) setIcon(b []byte) {
 	if len(a.shown) == len(b) && string(a.shown) == string(b) {
 		return
@@ -422,6 +584,29 @@ func (a *app) refreshStatus() {
 	tip := "Outloud\n" + text
 	if st.State == sender.Connected && st.Stats.TargetMs > 0 {
 		tip += fmt.Sprintf("\n%.0f ms buffer", st.Stats.TargetMs)
+	}
+
+	if hs := a.hearStatus; cfg.hearing() {
+		name := cfg.Hear
+		if hs.Receiver != "" {
+			name = hs.Receiver
+		}
+		switch {
+		case hs.State == sender.Connected:
+			text = "Hearing " + name + " on this PC"
+			if !cfg.streaming() || st.State != sender.Connected {
+				icon = a.icons.connected
+			}
+		case hs.State == sender.Disconnected && hs.Err != nil:
+			text = "Cannot reach " + name + " to hear it, retrying"
+		default:
+			text = "Looking for " + name + " to hear it…"
+		}
+		a.mHearStatus.SetTitle(text)
+		a.mHearStatus.Show()
+		tip += "\n" + text
+	} else {
+		a.mHearStatus.Hide()
 	}
 	if r := []rune(tip); len(r) > 127 {
 		tip = string(r[:126]) + "…"
@@ -472,6 +657,36 @@ func (a *app) refreshMenu() {
 		a.mStop.Enable()
 	} else {
 		a.mStop.Disable()
+	}
+
+	// Only Macs that advertise it can share their sound; an older receiver
+	// would take a listener for a sender.
+	var hear []speaker
+	listed = false
+	for _, s := range a.found {
+		if slices.Contains(s.TXT, proto.CaptureTXT) {
+			hear = append(hear, speaker{label: s.Instance, name: s.Instance, addr: s.Addr()})
+			listed = listed || strings.EqualFold(s.Instance, cfg.Hear)
+		}
+	}
+	if cfg.Hear != "" && !listed {
+		hear = append(hear, speaker{label: cfg.Hear + " (not found)", name: cfg.Hear, addr: cfg.HearAddress})
+	}
+	hear = hear[:min(len(hear), maxSpeakers)]
+	a.hearable = hear
+	for i, mi := range a.mHear {
+		if i >= len(hear) {
+			mi.Hide()
+			continue
+		}
+		mi.SetTitle(hear[i].label)
+		check(mi, strings.EqualFold(hear[i].name, cfg.Hear))
+		mi.Show()
+	}
+	if len(hear) == 0 {
+		a.mNoHear.Show()
+	} else {
+		a.mNoHear.Hide()
 	}
 
 	for i, l := range latencies {
@@ -535,7 +750,8 @@ func (a *app) discover() {
 		a.mu.Lock()
 		changed := len(svcs) != len(a.found)
 		for i := range svcs {
-			changed = changed || svcs[i].Instance != a.found[i].Instance || svcs[i].Addr() != a.found[i].Addr()
+			changed = changed || svcs[i].Instance != a.found[i].Instance || svcs[i].Addr() != a.found[i].Addr() ||
+				!slices.Equal(svcs[i].TXT, a.found[i].TXT)
 		}
 		a.found = svcs
 		// On first run, a single speaker on the network is surely the one.
