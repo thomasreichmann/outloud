@@ -451,6 +451,7 @@ func Play(conn net.Conn, rd *proto.Reader, pl Player) error {
 		}
 	}
 
+	var format proto.Format
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 		t, payload, err := rd.Next()
@@ -467,7 +468,11 @@ func Play(conn net.Conn, rd *proto.Reader, pl Player) error {
 				return err
 			}
 			pl.Playout.SetFormat(f.SampleRate, f.Channels)
-			pl.Logf(fmt.Sprintf("receiving %d Hz, %d ch", f.SampleRate, f.Channels))
+			// A Mac announces it again each time capture restarts.
+			if f != format {
+				format = f
+				pl.Logf(fmt.Sprintf("receiving %d Hz, %d ch", f.SampleRate, f.Channels))
+			}
 			onCapture(proto.Capture{})
 		case proto.MsgAudio:
 			pl.Playout.Write(payload)

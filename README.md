@@ -128,8 +128,10 @@ A forgotten PC is cut off within seconds, and has to pair again to connect.
 Under **Hear on this PC**, tick the Mac. Everything the Mac plays then also
 plays on the PC's default output, with the same **Latency**. The Mac keeps
 playing it too; turn the Mac down to hear it only on the PC (the Mac's volume
-does not change what the PC gets). While a PC listens, macOS may show its
-recording indicator in the menu bar.
+does not change what the PC gets). The Mac records only while something on it
+plays, and stops 10 s after the sound does, so a listening PC does not keep
+the Mac awake. While it records, macOS may show its recording indicator in
+the menu bar.
 
 Both directions can be on at once without the sound going round in circles:
 the Mac never sends back what the PC sends it, and the PC leaves the Mac's
@@ -242,7 +244,9 @@ finds them through Windows' DNS-SD API.
 To hear the Mac, the PC opens a second connection and asks the receiver to
 listen. The receiver captures the Mac's output with a Core Audio process tap
 that leaves out its own playback, and streams it back with the same messages;
-the PC plays it through the same jitter buffer. While it does, the PC
+the PC plays it through the same jitter buffer. A running tap keeps the Mac
+awake, so the receiver runs one only while another process plays, which Core
+Audio reports for each process. While it does, the PC
 captures with process loopback, which leaves out Outloud's own playback. The
 receiver installs as an app bundle, because macOS asks for permission to
 record audio on behalf of apps.

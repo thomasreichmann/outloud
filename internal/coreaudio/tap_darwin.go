@@ -48,15 +48,21 @@ const (
 	// much of it means playback stopped.
 	silenceIdle = 500 * time.Millisecond
 	// A gap this long without any buffer also means stopped.
-	gapIdle     = 100 * time.Millisecond
-	checkEvery  = time.Second
+	gapIdle    = 100 * time.Millisecond
+	checkEvery = time.Second
+	// Once nothing has played this long, capture stops so the Mac can sleep.
+	// Shorter would restart it between tracks and notification sounds.
+	quietStop   = 10 * time.Second
 	retryDelay  = 2 * time.Second
 	chunkQueue  = 64
 	tapName     = "Outloud"
 	captureHint = "allow Outloud in System Settings > Privacy & Security > Screen & System Audio Recording"
 )
 
-var errOutputChanged = errors.New("default output device changed")
+var (
+	errOutputChanged = errors.New("default output device changed")
+	errQuiet         = errors.New("nothing plays")
+)
 
 type propertyAddress struct {
 	selector, scope, element uint32
@@ -95,8 +101,13 @@ var (
 	audioDeviceDestroyIOProcID          func(dev uint32, id uintptr) int32
 	audioDeviceStart                    func(dev uint32, id uintptr) int32
 	audioDeviceStop                     func(dev uint32, id uintptr) int32
-	// TCCAccessPreflight is private API, used only to explain silence.
+	// TCCAccessPreflight is private API, used only to explain silence and
+	// to have macOS ask early.
 	tccAccessPreflight func(service objc.ID, options uintptr) int32
+	// answered is set once a tap has opened, which waits for the answer to
+	// macOS's question. TCCAccessPreflight keeps reporting what it found the
+	// first time, so after that its "not decided" is stale.
+	answered atomic.Bool
 
 	ioProcPtr uintptr
 	// active is the session the IOProc delivers to. One callback serves every
@@ -119,6 +130,9 @@ func load() error {
 		}
 		for name, fn := range map[string]any{
 			"AudioObjectGetPropertyData":          &audioObjectGetPropertyData,
+			"AudioObjectGetPropertyDataSize":      &audioObjectGetPropertyDataSize,
+			"AudioObjectAddPropertyListener":      &audioObjectAddPropertyListener,
+			"AudioObjectRemovePropertyListener":   &audioObjectRemovePropertyListener,
 			"AudioHardwareCreateProcessTap":       &audioHardwareCreateProcessTap,
 			"AudioHardwareDestroyProcessTap":      &audioHardwareDestroyProcessTap,
 			"AudioHardwareCreateAggregateDevice":  &audioHardwareCreateAggregateDevice,
@@ -153,6 +167,7 @@ func load() error {
 			sel[name] = objc.RegisterName(name)
 		}
 		ioProcPtr = purego.NewCallback(ioProc)
+		listenerPtr = purego.NewCallback(listener)
 	})
 	return loadErr
 }
@@ -161,7 +176,8 @@ func load() error {
 func Available() error { return load() }
 
 // Permission reports whether macOS lets this process record system audio:
-// "granted", "denied" or "not decided".
+// "granted", "denied", "not decided", or "unknown" once it was answered in a
+// way this process cannot learn.
 func Permission() string {
 	if load() != nil || tccAccessPreflight == nil {
 		return "unknown"
@@ -172,26 +188,36 @@ func Permission() string {
 	case tccDenied:
 		return "denied"
 	}
+	if answered.Load() {
+		return "unknown"
+	}
 	return "not decided"
 }
 
 // Tap captures everything this Mac plays except the sound of this process
-// itself, so a receiver never sends back what it is playing. It implements
-// source.Source.
+// itself, so a receiver never sends back what it is playing. It captures
+// only while another process plays sound, since a running capture keeps the
+// Mac from sleeping. It implements source.Source.
 type Tap struct{}
 
 func (t *Tap) Run(ctx context.Context, emit func(source.Event)) error {
 	if err := load(); err != nil {
 		return err
 	}
+	// Without the watch, capture runs all the time.
+	w, _ := watchPlayers()
+	defer w.close()
 	for {
-		err := t.capture(ctx, emit)
+		if !ready(ctx, w, emit) {
+			return nil
+		}
+		err := t.capture(ctx, emit, w)
 		if ctx.Err() != nil {
 			return nil
 		}
 		emit(source.Event{Kind: source.Idle})
 		delay := retryDelay
-		if errors.Is(err, errOutputChanged) {
+		if errors.Is(err, errOutputChanged) || errors.Is(err, errQuiet) {
 			delay = 0
 		} else {
 			emit(source.Event{Kind: source.Status, Err: err})
@@ -204,9 +230,24 @@ func (t *Tap) Run(ctx context.Context, emit func(source.Event)) error {
 	}
 }
 
+// ready waits until another process plays sound, and reports false if ctx
+// is done first. While macOS has yet to ask for permission it returns at
+// once, so that macOS asks while someone is setting Outloud up.
+func ready(ctx context.Context, w *players, emit func(source.Event)) bool {
+	switch Permission() {
+	case "not decided":
+		return true
+	case "denied":
+		// Say so now rather than when something plays. Capture still starts
+		// then: this process would not learn that permission was given.
+		emit(source.Event{Kind: source.Status, Err: fmt.Errorf("%w: %s", source.ErrDenied, captureHint)})
+	}
+	return w.wait(ctx)
+}
+
 // capture runs one tap until it fails, the default output device changes,
-// or ctx is done.
-func (t *Tap) capture(ctx context.Context, emit func(source.Event)) error {
+// nothing has played for quietStop, or ctx is done.
+func (t *Tap) capture(ctx context.Context, emit func(source.Event), w *players) error {
 	// Until someone answers macOS's prompt, opening the tap waits.
 	if Permission() == "not decided" {
 		emit(source.Event{Kind: source.Status, Err: fmt.Errorf("%w: macOS asks on this Mac's screen", source.ErrNeedsPermission)})
@@ -230,11 +271,22 @@ func (t *Tap) capture(ctx context.Context, emit func(source.Event)) error {
 		lastPacket time.Time
 		lastSound  time.Time
 		lastCheck  = time.Now()
+		quietSince time.Time // since when no other process plays
 	)
+	checkPlayers := func(now time.Time) {
+		if playing, err := w.playing(); err != nil || playing {
+			quietSince = time.Time{}
+		} else if quietSince.IsZero() {
+			quietSince = now
+		}
+	}
+	checkPlayers(time.Now())
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-w.changes():
+			checkPlayers(time.Now())
 		case b := <-s.chunks:
 			now := time.Now()
 			samples, silent := conv.Convert(nil, b, len(b)/conv.FrameBytes())
@@ -253,6 +305,9 @@ func (t *Tap) capture(ctx context.Context, emit func(source.Event)) error {
 			if active && now.Sub(lastPacket) > gapIdle {
 				emit(source.Event{Kind: source.Idle})
 				active = false
+			}
+			if !quietSince.IsZero() && now.Sub(quietSince) >= quietStop {
+				return errQuiet
 			}
 			if now.Sub(lastCheck) >= checkEvery {
 				lastCheck = now
@@ -362,6 +417,7 @@ func open() (s *session, err error) {
 		return nil, fmt.Errorf("starting capture: %v", osStatus(st))
 	}
 	s.started = true
+	answered.Store(true)
 	return s, nil
 }
 
