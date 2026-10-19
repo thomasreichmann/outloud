@@ -90,14 +90,14 @@ func TestSetupPairs(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(body, `PIN="`+pin+`"`) || !strings.Contains(body, `BASE="https://127.0.0.1:`) {
 		t.Fatalf("script: %d\n%s", status, body)
 	}
-	if status, body := get(t, base+"/outloud-receiver-darwin-arm64", pin); status != http.StatusOK || body != "binary outloud-receiver-darwin-arm64" {
+	if status, body := get(t, base+"/outloud-receiver-darwin-arm64.tar.gz", pin); status != http.StatusOK || body != "binary outloud-receiver-darwin-arm64.tar.gz" {
 		t.Errorf("binary: %d %q", status, body)
 	}
 	u, _ := url.Parse(base)
 	if status, _ := get(t, u.Scheme+"://"+u.Host+"/wrongtok", pin); status != http.StatusNotFound {
 		t.Errorf("a wrong token got %d", status)
 	}
-	if status, _ := get(t, u.Scheme+"://"+u.Host+"/outloud-receiver-darwin-arm64", pin); status != http.StatusNotFound {
+	if status, _ := get(t, u.Scheme+"://"+u.Host+"/outloud-receiver-darwin-arm64.tar.gz", pin); status != http.StatusNotFound {
 		t.Errorf("no token got %d", status)
 	}
 
@@ -133,5 +133,12 @@ func TestReleaseScript(t *testing.T) {
 	s := Script("https://github.com/x/releases/download/v1", "")
 	if strings.Contains(s, "__") || !strings.Contains(s, `PIN=""`) {
 		t.Errorf("script:\n%s", s)
+	}
+	// It downloads what a PC serves, under the same names as on GitHub.
+	for _, name := range binaries {
+		arch := strings.TrimSuffix(strings.TrimPrefix(name, "outloud-receiver-darwin-"), ".tar.gz")
+		if !strings.Contains(strings.ReplaceAll(s, "$ARCH", arch), "/"+name+`"`) {
+			t.Errorf("the script does not download %s", name)
+		}
 	}
 }

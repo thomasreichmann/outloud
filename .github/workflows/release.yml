@@ -1,25 +1,55 @@
 name: Release
 
 # Pushing a tag like v0.2.0 builds everything and publishes it as a GitHub
-# release, which the one-line installers download from.
+# release, which the one-line installers download from. Running it by hand
+# builds and signs everything without publishing, to try a release first.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Signing the Mac receiver takes codesign, which only macOS has.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # for the version from git describe, when run by hand
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go test ./...
-      - run: VERSION="$GITHUB_REF_NAME" ./build.sh release
+      - name: Import the Mac signing certificate
+        env:
+          P12: ${{ secrets.MAC_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then
+            echo "The MAC_SIGN_P12 secret is missing." >&2
+            exit 1
+          fi
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpass=$(openssl rand -hex 16)
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          security import "$RUNNER_TEMP/signing.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpass" "$kc" > /dev/null
+          rm "$RUNNER_TEMP/signing.p12"
+          echo "MAC_SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            export VERSION="$GITHUB_REF_NAME"
+          fi
+          ./build.sh release
       - name: Publish
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -28,3 +58,12 @@ jobs:
             --title "Outloud ${GITHUB_REF_NAME#v}" \
             --notes-file .github/release-notes.md \
             --generate-notes
+      - name: Keep the build
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: outloud
+          path: dist/release/
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true

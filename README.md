@@ -62,9 +62,11 @@ on the PC.
 on the network, a fresh install picks it by itself. Unless you set the Mac up
 from the PC, the two pair now: see [Pairing](#pairing).
 
-The binaries are not code-signed. Both one-line installers download with
-tools that do not mark files as coming from the internet, so SmartScreen and
-Gatekeeper do not interfere; the zip's installer removes that mark itself.
+The Windows programs are not code-signed, and the Mac receiver is signed
+with Outloud's own certificate rather than one from Apple. Both one-line
+installers download with tools that do not mark files as coming from the
+internet, so SmartScreen and Gatekeeper do not interfere; the zip's installer
+removes that mark itself.
 
 ## Using it
 
@@ -209,7 +211,8 @@ On the Mac, `outloud-receiver` runs in the foreground when started without
   asking on the Mac whether Outloud may record its sound: click **Allow**
   there. If it was refused, allow Outloud in System Settings ▸ Privacy &
   Security ▸ Screen & System Audio Recording, under *System Audio Recording
-  Only*. macOS asks again after every update of the receiver.
+  Only*. macOS remembers the answer across updates from 0.4.0 on; updating
+  from an older receiver asks once more.
 
 Logs: `%LOCALAPPDATA%\Outloud\Outloud.log` (tray menu ▸ **Open log**) and
 `~/Library/Logs/Outloud.log` on the Mac.
@@ -228,8 +231,9 @@ Logs: `%LOCALAPPDATA%\Outloud\Outloud.log` (tray menu ▸ **Open log**) and
   Likewise one PC at a time can hear the Mac.
 - Anyone on the network can see that a receiver is there, and what it is
   called, and can ask to pair, which the Mac asks you about.
-- The binaries are not code-signed, so macOS may ask again for permission to
-  record the Mac's audio after the receiver is updated.
+- The Mac receiver's certificate is Outloud's own, not Apple's, so install
+  it with the commands above: Gatekeeper refuses it if a browser downloaded
+  it.
 
 ## How it works
 
@@ -249,7 +253,9 @@ awake, so the receiver runs one only while another process plays, which Core
 Audio reports for each process. While it does, the PC
 captures with process loopback, which leaves out Outloud's own playback. The
 receiver installs as an app bundle, because macOS asks for permission to
-record audio on behalf of apps.
+record audio on behalf of apps. Releases sign the bundle with Outloud's own
+certificate. macOS ties the permission to the certificate, so it survives
+updates; the ad hoc signature of a local build changes with every build.
 
 Each PC and Mac makes its own key the first time it runs. In every
 connection both sides present theirs in TLS 1.3, and each checks the other's
@@ -288,7 +294,10 @@ Go 1.27 or later; no C toolchain, everything cross-compiles with cgo off.
 go test ./...
 ```
 
-Pushing a `v*` tag builds and publishes a release through GitHub Actions.
+Pushing a `v*` tag builds and publishes a release through GitHub Actions, on
+macOS, which signs the Mac receiver with the certificate in the
+`MAC_SIGN_P12` secret. Running the Release workflow by hand builds and signs
+without publishing.
 
 ## License
 

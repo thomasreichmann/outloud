@@ -20,10 +20,11 @@ esac
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 echo "Downloading the Outloud receiver ($ARCH) from $BASE ..."
+# The archive holds Outloud.app, which installs itself.
 if [ -n "$PIN" ]; then
-	curl -fsSLk --pinnedpubkey "$PIN" "$BASE/outloud-receiver-darwin-$ARCH" -o "$TMP/outloud-receiver"
+	curl -fsSLk --pinnedpubkey "$PIN" "$BASE/outloud-receiver-darwin-$ARCH.tar.gz" -o "$TMP/receiver.tar.gz"
 else
-	curl -fsSL "$BASE/outloud-receiver-darwin-$ARCH" -o "$TMP/outloud-receiver"
+	curl -fsSL "$BASE/outloud-receiver-darwin-$ARCH.tar.gz" -o "$TMP/receiver.tar.gz"
 fi
-chmod +x "$TMP/outloud-receiver"
-OUTLOUD_SETUP="$BASE" OUTLOUD_SETUP_PIN="$PIN" "$TMP/outloud-receiver" install "$@"
+tar -xzf "$TMP/receiver.tar.gz" -C "$TMP"
+OUTLOUD_SETUP="$BASE" OUTLOUD_SETUP_PIN="$PIN" "$TMP/Outloud.app/Contents/MacOS/outloud-receiver" install "$@"

@@ -36,9 +36,10 @@ var script string
 // DefaultPort is where the installer is served.
 const DefaultPort = 8088
 
-var binaries = []string{"outloud-receiver-darwin-arm64", "outloud-receiver-darwin-amd64"}
+// binaries are the receiver's app bundle for each kind of Mac, archived.
+var binaries = []string{"outloud-receiver-darwin-arm64.tar.gz", "outloud-receiver-darwin-amd64.tar.gz"}
 
-// Dir is where the Mac binaries are expected: a "mac" folder next to the
+// Dir is where the Mac receivers are expected: a "mac" folder next to the
 // running executable.
 func Dir() string {
 	exe, err := os.Executable()

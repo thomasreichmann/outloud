@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -60,27 +61,17 @@ func install(args []string) error {
 	if self, err = filepath.EvalSymlinks(self); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p.binary), 0o755); err != nil {
-		return err
-	}
-	if self != p.binary {
-		// Replace by rename, never in place: macOS caches code signatures
-		// per file and kills a binary that was overwritten while cached.
-		if err := copyFile(self, p.binary+".new"); err != nil {
-			return err
+	if app := bundleOf(self); app != "" && certSigned(app) {
+		// A release: Outloud.app as built, signed with Outloud's certificate.
+		// It is installed untouched, so that macOS knows it after an update
+		// and keeps its permission to record.
+		if app != p.app {
+			if err := copyApp(app, p.app); err != nil {
+				return err
+			}
 		}
-		if err := os.Rename(p.binary+".new", p.binary); err != nil {
-			return err
-		}
-	}
-	if err := os.WriteFile(filepath.Join(p.app, "Contents", "Info.plist"), infoPlist(), 0o644); err != nil {
+	} else if err := makeApp(self, p); err != nil {
 		return err
-	}
-	// Sign the bundle as a whole (ad hoc), which binds the Info.plist to the
-	// binary; macOS then knows the receiver as Outloud in its privacy
-	// settings.
-	if out, err := exec.Command("/usr/bin/codesign", "--force", "--sign", "-", p.app).CombinedOutput(); err != nil {
-		fmt.Printf("warning: signing %s: %v: %s\n", p.app, err, bytes.TrimSpace(out))
 	}
 	// The plain path, which earlier versions installed to, stays usable.
 	if err := os.Remove(p.link); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -230,42 +221,110 @@ func plist(args []string, logPath string) []byte {
 	return b.Bytes()
 }
 
-func infoPlist() []byte {
-	v := strings.TrimPrefix(version.Version, "v")
-	return []byte(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>CFBundleIdentifier</key>
-	<string>` + agentLabel + `</string>
-	<key>CFBundleName</key>
-	<string>Outloud</string>
-	<key>CFBundleExecutable</key>
-	<string>outloud-receiver</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>` + v + `</string>
-	<key>CFBundleVersion</key>
-	<string>` + v + `</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>12.0</string>
-	<key>LSUIElement</key>
-	<true/>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>Outloud sends this Mac's sound to a PC that asks to listen to it.</string>
-</dict>
-</plist>
-`)
+// makeApp builds the app bundle around the binary self, for a receiver that
+// does not come in a signed one, such as a development build.
+func makeApp(self string, p paths) error {
+	if err := os.MkdirAll(filepath.Dir(p.binary), 0o755); err != nil {
+		return err
+	}
+	if self != p.binary {
+		// Replace by rename, never in place: macOS caches code signatures
+		// per file and kills a binary that was overwritten while cached.
+		if err := copyFile(self, p.binary+".new", 0o755); err != nil {
+			return err
+		}
+		if err := os.Rename(p.binary+".new", p.binary); err != nil {
+			return err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(p.app, "Contents", "Info.plist"), infoPlist(), 0o644); err != nil {
+		return err
+	}
+	// Sign the bundle as a whole (ad hoc), which binds the Info.plist to the
+	// binary; macOS then knows the receiver as Outloud in its privacy
+	// settings. An ad hoc signature changes with every build, so macOS asks
+	// for permission to record again after each update.
+	if out, err := exec.Command("/usr/bin/codesign", "--force", "--sign", "-", p.app).CombinedOutput(); err != nil {
+		fmt.Printf("warning: signing %s: %v: %s\n", p.app, err, bytes.TrimSpace(out))
+	}
+	return nil
 }
 
-func copyFile(from, to string) error {
+// infoPlistTemplate is the app bundle's Info.plist, which build.sh fills in
+// for releases too.
+//
+//go:embed Info.plist
+var infoPlistTemplate string
+
+func infoPlist() []byte {
+	return []byte(strings.ReplaceAll(infoPlistTemplate, "__VERSION__", strings.TrimPrefix(version.Version, "v")))
+}
+
+// bundleOf returns the app bundle that the executable exe is the program of,
+// or "" if it is not in one.
+func bundleOf(exe string) string {
+	macOS := filepath.Dir(exe)
+	contents := filepath.Dir(macOS)
+	app := filepath.Dir(contents)
+	if filepath.Base(macOS) != "MacOS" || filepath.Base(contents) != "Contents" || filepath.Ext(app) != ".app" {
+		return ""
+	}
+	return app
+}
+
+// certSigned reports whether app is intact and signed with a certificate,
+// as releases are, rather than ad hoc or not at all.
+func certSigned(app string) bool {
+	if exec.Command("/usr/bin/codesign", "--verify", "--strict", app).Run() != nil {
+		return false
+	}
+	out, err := exec.Command("/usr/bin/codesign", "-dv", app).CombinedOutput()
+	return err == nil && !bytes.Contains(out, []byte("Signature=adhoc"))
+}
+
+// copyApp puts a copy of the bundle app at to. Like the binary, the bundle
+// is replaced by rename, never in place.
+func copyApp(app, to string) error {
+	tmp, old := to+".new", to+".old"
+	_ = os.RemoveAll(tmp)
+	err := filepath.WalkDir(app, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(app, path)
+		dst := filepath.Join(tmp, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.IsDir():
+			return os.MkdirAll(dst, 0o755)
+		case info.Mode().IsRegular():
+			return copyFile(path, dst, info.Mode().Perm())
+		}
+		return fmt.Errorf("unexpected file in %s: %s", app, rel)
+	})
+	if err != nil {
+		return err
+	}
+	_ = os.RemoveAll(old)
+	if err := os.Rename(to, old); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(tmp, to); err != nil {
+		return err
+	}
+	return os.RemoveAll(old)
+}
+
+func copyFile(from, to string, mode os.FileMode) error {
 	in, err := os.Open(from)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(to, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	out, err := os.OpenFile(to, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
 		return err
 	}
