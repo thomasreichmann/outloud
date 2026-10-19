@@ -41,6 +41,10 @@ jobs:
           security import "$RUNNER_TEMP/signing.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpass" "$kc" > /dev/null
           rm "$RUNNER_TEMP/signing.p12"
+          # codesign looks for the identity only in keychains on the search list.
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          sw_vers -productVersion
+          security find-identity -p codesigning "$kc"
           echo "MAC_SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
       - name: Build
         run: |
