@@ -213,7 +213,7 @@ Logs: `%LOCALAPPDATA%\Outloud\Outloud.log` (tray menu ▸ **Open log**) and
 ## Uninstall
 
 - **PC:** Settings ▸ Apps ▸ Installed apps ▸ Outloud ▸ Uninstall. This also
-  removes its settings and logs.
+  removes its settings, logs, key and paired Macs.
 - **Mac:** `~/Library/Application\ Support/Outloud/outloud-receiver uninstall`.
   This removes the receiver (`Outloud.app` in that folder), its login item,
   its key and its paired PCs; the log stays.
