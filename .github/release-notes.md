@@ -1,3 +1,13 @@
+## What's new in 0.3.1
+
+- **The tray says what is wrong on the Mac.** While hearing the Mac, it says
+  when macOS is asking on the Mac for permission to record ("click Allow on
+  the Mac") or when that was refused. While streaming, it says when the Mac
+  is muted or cannot play, and its tooltip names the Mac's output device.
+- Hearing the Mac no longer reconnects over and over while macOS asks for
+  that permission.
+- 0.3.1 and 0.3.0 work together, so updating one side at a time is fine.
+
 ## What's new in 0.3.0
 
 - **Pairing, and encryption.** A Mac now only plays sound from PCs it is
@@ -12,8 +22,8 @@
 - Forget a Mac under **Paired Macs** in the tray menu; on the Mac,
   `outloud-receiver paired` and `outloud-receiver forget` do the same.
 
-**Update both the PC and the Mac**, with the commands below: 0.3.0 cannot
-talk to older versions. An older Mac shows as "(needs update)" in the tray
+**Coming from 0.2? Update both the PC and the Mac**, with the commands
+below: 0.3 cannot talk to older versions. An older Mac shows as "(needs update)" in the tray
 menu; an older PC reports "peer speaks protocol version 2". The first time
 the updated PC picks the Mac, the two pair. As after every update of the
 receiver, macOS asks again whether Outloud may record the Mac's audio.
