@@ -29,6 +29,8 @@ type Status struct {
 	PeerID   string // the ID of the receiver's key
 	Addr     string
 	Err      error // why the connection failed
+	// Capture is the receiver's problem capturing its sound, if any.
+	Capture proto.Capture
 }
 
 type Listener struct {
@@ -109,9 +111,18 @@ func (l *Listener) session(ctx context.Context, addr string) error {
 	l.Playout.Reset()
 	l.Playout.SetTarget(l.Latency)
 	defer l.Playout.Idle()
-	l.update(Status{State: sender.Connected, Receiver: c.Peer.Name, Software: c.Peer.Software, PeerID: c.PeerID, Addr: addr})
-	err = receiver.Play(c, c.Reader, l.Playout, func() bool { return true }, func(msg string) {
-		l.Log.Printf("%s: %s", c.Peer.Name, msg)
+	st := Status{State: sender.Connected, Receiver: c.Peer.Name, Software: c.Peer.Software, PeerID: c.PeerID, Addr: addr}
+	l.update(st)
+	err = receiver.Play(c, c.Reader, receiver.Player{
+		Playout: l.Playout,
+		Current: func() bool { return true },
+		Logf:    func(msg string) { l.Log.Printf("%s: %s", c.Peer.Name, msg) },
+		OnCapture: func(problem proto.Capture) {
+			if problem != st.Capture {
+				st.Capture = problem
+				l.update(st)
+			}
+		},
 	})
 	switch {
 	case ctx.Err() != nil:

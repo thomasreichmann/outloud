@@ -4,8 +4,20 @@ package source
 
 import (
 	"context"
+	"errors"
 	"math"
 	"time"
+)
+
+// Errors in Status events that the side playing the audio can explain to
+// its user; sources wrap them.
+var (
+	// ErrNeedsPermission means the operating system is asking the person
+	// at this computer whether Outloud may record its sound. Capture waits
+	// for the answer.
+	ErrNeedsPermission = errors.New("waiting for permission to record this computer's sound")
+	// ErrDenied means Outloud may not record this computer's sound.
+	ErrDenied = errors.New("not allowed to record this computer's sound")
 )
 
 type Kind int

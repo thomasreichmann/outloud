@@ -585,6 +585,14 @@ func (a *app) onStatus(st sender.Status) {
 	case st.Stats.Underruns > prev.Stats.Underruns:
 		a.log.Printf("speaker's buffer ran dry; it now buffers %.0f ms", st.Stats.TargetMs)
 	}
+	if st.State == sender.Connected {
+		if st.Stats.OutputError != prev.Stats.OutputError && st.Stats.OutputError != "" {
+			a.log.Printf("%q cannot play: %s", st.Receiver, st.Stats.OutputError)
+		}
+		if st.Stats.Muted && !prev.Stats.Muted {
+			a.log.Printf("%q is muted (%s)", st.Receiver, st.Stats.Output)
+		}
+	}
 	a.refreshStatus()
 }
 
@@ -612,6 +620,13 @@ func (a *app) onHearStatus(st listener.Status) {
 		a.log.Printf("hearing %q at %s (%s)", st.Receiver, st.Addr, st.Software)
 	case st.State != prev.State && st.State == sender.Disconnected && st.Err != nil:
 		a.log.Printf("not hearing: %v", st.Err)
+	}
+	switch {
+	case st.Capture == prev.Capture:
+	case st.Capture.Error != "":
+		a.log.Printf("%q cannot share its sound: %s", st.Receiver, st.Capture.Error)
+	case prev.Capture.Error != "" && st.State == sender.Connected:
+		a.log.Printf("%q shares its sound again", st.Receiver)
 	}
 	a.refreshStatus()
 }
@@ -657,6 +672,12 @@ func (a *app) refreshStatus() {
 		text = problem(st.Err, name)
 	case st.State == sender.Connected && st.Err != nil:
 		text, icon = "Connected to "+name+", but "+st.Err.Error(), a.icons.connected
+	case st.State == sender.Connected && st.Stats.OutputError != "":
+		text, icon = name+" cannot play: "+st.Stats.OutputError, a.icons.connected
+	case st.State == sender.Connected && st.Stats.Muted && st.Playing:
+		text, icon = "Streaming to "+name+", but the Mac is muted", a.icons.playing
+	case st.State == sender.Connected && st.Stats.Muted:
+		text, icon = "Connected to "+name+", but the Mac is muted", a.icons.connected
 	case st.State == sender.Connected && st.Playing:
 		text, icon = "Streaming to "+name, a.icons.playing
 	case st.State == sender.Connected:
@@ -671,6 +692,9 @@ func (a *app) refreshStatus() {
 	}
 	a.mStatus.SetTitle(text)
 	tip := "Outloud\n" + text
+	if st.State == sender.Connected && st.Stats.Output != "" {
+		tip += "\nPlays on " + st.Stats.Output
+	}
 	if st.State == sender.Connected && st.Stats.TargetMs > 0 {
 		tip += fmt.Sprintf("\n%.0f ms buffer", st.Stats.TargetMs)
 	}
@@ -681,6 +705,12 @@ func (a *app) refreshStatus() {
 			name = hs.Receiver
 		}
 		switch {
+		case hs.State == sender.Connected && hs.Capture.Problem == proto.CaptureNeedsPermission:
+			text = name + ": click Allow on the Mac to let it share its sound"
+		case hs.State == sender.Connected && hs.Capture.Problem == proto.CaptureDenied:
+			text = name + " may not share its sound: see its Privacy & Security settings"
+		case hs.State == sender.Connected && hs.Capture.Error != "":
+			text = name + " cannot capture its sound: " + hs.Capture.Error
 		case hs.State == sender.Connected:
 			text = "Hearing " + name + " on this PC"
 			if !cfg.streaming() || st.State != sender.Connected {

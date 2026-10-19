@@ -207,6 +207,10 @@ func (t *Tap) Run(ctx context.Context, emit func(source.Event)) error {
 // capture runs one tap until it fails, the default output device changes,
 // or ctx is done.
 func (t *Tap) capture(ctx context.Context, emit func(source.Event)) error {
+	// Until someone answers macOS's prompt, opening the tap waits.
+	if Permission() == "not decided" {
+		emit(source.Event{Kind: source.Status, Err: fmt.Errorf("%w: macOS asks on this Mac's screen", source.ErrNeedsPermission)})
+	}
 	s, err := open()
 	if err != nil {
 		return err
@@ -216,7 +220,7 @@ func (t *Tap) capture(ctx context.Context, emit func(source.Event)) error {
 	conv := source.NewConverter(source.Float32, s.channels, 0)
 	emit(source.Event{Kind: source.Format, Rate: s.rate, Device: s.device})
 	if Permission() == "denied" {
-		emit(source.Event{Kind: source.Status, Err: errors.New("macOS does not let Outloud record this Mac's sound: " + captureHint)})
+		emit(source.Event{Kind: source.Status, Err: fmt.Errorf("%w: %s", source.ErrDenied, captureHint)})
 	}
 
 	tick := time.NewTicker(gapIdle / 2)

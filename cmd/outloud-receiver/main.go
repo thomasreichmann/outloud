@@ -165,6 +165,9 @@ Flags:
 		Name: *name, Playout: p, Latency: *latency, Capture: own,
 		Identity: id, Peers: peers, Confirm: ctl.confirm, Log: log.Default(),
 	}
+	if !*null {
+		srv.Output = func() receiver.Output { return describeOutput(out) }
+	}
 	var names []string
 	if list, err := peers.List(); err != nil {
 		log.Printf("reading the paired PCs: %v", err)
@@ -236,6 +239,20 @@ func monitor(p *playout.Playout, out output, verbose bool) {
 		}
 		prev = st
 	}
+}
+
+// describeOutput says where this computer plays, for senders to show.
+func describeOutput(out output) receiver.Output {
+	var o receiver.Output
+	var err error
+	o.Device, o.Muted, err = systemOutput()
+	if err == nil {
+		err = out.Err()
+	}
+	if err != nil {
+		o.Error = err.Error()
+	}
+	return o
 }
 
 // nullOutput consumes audio at real-time pace without a sound card.

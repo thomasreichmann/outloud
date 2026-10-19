@@ -54,6 +54,8 @@ func startDevice(io.Reader, *playout.Playout, time.Duration) (output, error) {
 
 func systemCapture() (source.Source, string) { return nil, "" }
 
+func systemOutput() (string, bool, error) { return "", false, nil }
+
 func computerName() string { return hostName() }
 
 func localHostName() string { return hostName() }

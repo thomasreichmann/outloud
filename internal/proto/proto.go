@@ -73,6 +73,10 @@ const (
 	MsgPairNonce    MsgType = 9
 	MsgPairReveal   MsgType = 10
 	MsgPairDecision MsgType = 11
+	// MsgCapture carries a JSON Capture, written by the side sending audio
+	// when its capture has a problem. A Format message means the problem
+	// is over.
+	MsgCapture MsgType = 12
 )
 
 func (t MsgType) String() string {
@@ -99,6 +103,8 @@ func (t MsgType) String() string {
 		return "pair reveal"
 	case MsgPairDecision:
 		return "pair decision"
+	case MsgCapture:
+		return "capture"
 	}
 	return fmt.Sprintf("msg(%d)", uint8(t))
 }
@@ -153,7 +159,30 @@ type Stats struct {
 	DriftPPM  float64 `json:"drift_ppm"`
 	Underruns int     `json:"underruns"`
 	Skips     int     `json:"skips"`
+	// Output is the device the audio plays on, Muted whether that device
+	// is muted or at zero volume, and OutputError why it cannot play.
+	// Empty where the playing side does not know.
+	Output      string `json:"output,omitempty"`
+	Muted       bool   `json:"muted,omitempty"`
+	OutputError string `json:"output_error,omitempty"`
 }
+
+// Capture reports a problem with the sending side's capture.
+type Capture struct {
+	// Problem is one of the Capture constants, or empty for another
+	// problem, which Error describes.
+	Problem string `json:"problem,omitempty"`
+	Error   string `json:"error"`
+}
+
+// Capture problems that the side playing the audio can explain.
+const (
+	// CaptureNeedsPermission: the operating system is asking the person at
+	// the sending computer whether Outloud may record its sound.
+	CaptureNeedsPermission = "needs permission"
+	// CaptureDenied: Outloud may not record the sending computer's sound.
+	CaptureDenied = "denied"
+)
 
 // Format describes the audio that follows.
 type Format struct {

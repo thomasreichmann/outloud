@@ -36,6 +36,9 @@ func systemCapture() (source.Source, string) {
 	return &coreaudio.Tap{}, "recording permission: " + coreaudio.Permission()
 }
 
+// systemOutput is the default output device, and whether it is muted.
+func systemOutput() (string, bool, error) { return coreaudio.Output() }
+
 // computerName is the name shown in System Settings > General > Sharing.
 func computerName() string {
 	if n := scutil("ComputerName"); n != "" {

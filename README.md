@@ -192,8 +192,9 @@ On the Mac, `outloud-receiver` runs in the foreground when started without
 - **Crackling.** Choose a higher **Latency**. If the crackle is steady rather
   than occasional, the Mac's own output buffer is too small: reinstall the
   receiver with `-device-buffer 80ms`.
-- **No sound.** Run `outloud-send meter` while something plays, to check that
-  capture works. Check the Mac's volume and output device. With **Follow
+- **No sound.** The tray menu's first line says so when the Mac is muted or
+  cannot play; its tooltip names the Mac's output device. Run `outloud-send
+  meter` while something plays, to check that capture works. With **Follow
   Windows volume** on, a muted PC means a muted Mac.
 - **Too quiet.** With **Follow Windows volume** on, the Mac also applies the
   PC's volume. Turn the PC up, or the option off.
@@ -202,10 +203,11 @@ On the Mac, `outloud-receiver` runs in the foreground when started without
 - **The Mac is missing under Hear on this PC.** Update the Mac's receiver
   (step 2 above): only receivers from 0.2.0 on, on macOS 14.2 or later, can
   share the Mac's sound.
-- **Hearing the Mac stays silent.** macOS may not let Outloud record the
-  Mac's audio: in System Settings ▸ Privacy & Security ▸ Screen & System
-  Audio Recording, allow Outloud under *System Audio Recording Only*. The
-  Mac's log says so too. macOS may ask again after the receiver is updated.
+- **Hearing the Mac stays silent.** The tray menu says why. Usually macOS is
+  asking on the Mac whether Outloud may record its sound: click **Allow**
+  there. If it was refused, allow Outloud in System Settings ▸ Privacy &
+  Security ▸ Screen & System Audio Recording, under *System Audio Recording
+  Only*. macOS asks again after every update of the receiver.
 
 Logs: `%LOCALAPPDATA%\Outloud\Outloud.log` (tray menu ▸ **Open log**) and
 `~/Library/Logs/Outloud.log` on the Mac.

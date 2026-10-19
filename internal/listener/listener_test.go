@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"math"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/thomasreichmann/outloud/internal/listener"
 	"github.com/thomasreichmann/outloud/internal/pairing"
 	"github.com/thomasreichmann/outloud/internal/playout"
+	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/receiver"
 	"github.com/thomasreichmann/outloud/internal/sender"
 	"github.com/thomasreichmann/outloud/internal/source"
@@ -105,6 +108,82 @@ func TestBothDirections(t *testing.T) {
 	if s.Status().State != sender.Connected {
 		t.Error("the sender was dropped when the listener connected")
 	}
+}
+
+// stuckCapture behaves like a Mac's capture while macOS asks for permission:
+// it says so, then waits until release is closed, ignoring cancellation, as
+// the call that waits for the answer does.
+type stuckCapture struct{ release chan struct{} }
+
+func (c stuckCapture) Run(ctx context.Context, emit func(source.Event)) error {
+	emit(source.Event{Kind: source.Status, Err: fmt.Errorf("%w: test", source.ErrNeedsPermission)})
+	<-c.release
+	if ctx.Err() != nil {
+		return nil
+	}
+	return source.Tone{Freq: 660, Gain: 0.25}.Run(ctx, emit)
+}
+
+// TestCaptureProblem checks that a listener learns why the receiver sends
+// nothing, also when it waits for the previous listener's capture to stop,
+// and that the sound comes once capture works.
+func TestCaptureProblem(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	pc, mac, pcPeers, macPeers := paired(t)
+	release := make(chan struct{})
+	srv := &receiver.Server{
+		Name: "test receiver", Playout: playout.New(playout.Config{OutputRate: 48000}),
+		Capture: stuckCapture{release}, Identity: mac, Peers: macPeers, Log: log.New(io.Discard, "", 0),
+	}
+	go srv.Serve(l)
+	// listen starts a listener, and returns how often its connection drops.
+	listen := func() (*listener.Listener, *playout.Playout, func() int, context.CancelFunc) {
+		local := playout.New(playout.Config{OutputRate: 48000, Target: 40 * time.Millisecond})
+		var mu sync.Mutex
+		drops, connected := 0, false
+		ln := &listener.Listener{
+			Target: sender.Target{Addr: l.Addr().String()}, Name: "pc", Identity: pc, Peers: pcPeers,
+			Playout: local, Latency: 40 * time.Millisecond, Log: log.New(io.Discard, "", 0),
+			OnStatus: func(st listener.Status) {
+				mu.Lock()
+				defer mu.Unlock()
+				if connected && st.State != sender.Connected {
+					drops++
+				}
+				connected = st.State == sender.Connected
+			},
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go ln.Run(ctx)
+		return ln, local, func() int { mu.Lock(); defer mu.Unlock(); return drops }, cancel
+	}
+	needsPermission := func(ln *listener.Listener) func() bool {
+		return func() bool {
+			st := ln.Status()
+			return st.State == sender.Connected && st.Capture.Problem == proto.CaptureNeedsPermission
+		}
+	}
+
+	first, _, _, stopFirst := listen()
+	waitFor(t, "the first listener to hear why", needsPermission(first))
+	// The first listener goes, leaving its capture stuck; the next one
+	// waits for it.
+	stopFirst()
+	second, local, drops, stopSecond := listen()
+	defer stopSecond()
+	waitFor(t, "the second listener to hear why", needsPermission(second))
+	time.Sleep(7 * time.Second) // longer than the 5 s without data that ends a connection
+	if drops() != 0 || second.Status().State != sender.Connected {
+		t.Fatalf("the waiting listener was dropped %d times", drops())
+	}
+
+	close(release)
+	waitFor(t, "the problem to clear", func() bool { return second.Status().Capture == proto.Capture{} })
+	waitFor(t, "the receiver's sound", func() bool { return peak(local) > 0.2 })
 }
 
 // TestNoCapture checks that a receiver without a capture source turns a

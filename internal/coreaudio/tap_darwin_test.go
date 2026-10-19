@@ -64,6 +64,22 @@ func TestTap(t *testing.T) {
 	t.Logf("format %d Hz from %q; %d audio packets, %d frames, %d idles", format.Rate, format.Device, audio, frames, idle)
 }
 
+// TestOutput reads the default output's name and mute state. It plays
+// nothing, so it runs everywhere on a Mac.
+func TestOutput(t *testing.T) {
+	if err := load(); err != nil {
+		t.Skip(err)
+	}
+	name, muted, err := Output()
+	if err != nil {
+		t.Skip(err) // a build machine may have no output device
+	}
+	if name == "" {
+		t.Error("the default output has no name")
+	}
+	t.Logf("default output %q, muted %v", name, muted)
+}
+
 // TestBuffers checks that the IOProc delivers buffers at all, silent or not.
 func TestBuffers(t *testing.T) {
 	needTap(t)

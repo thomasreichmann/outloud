@@ -81,6 +81,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 
 func TestStreamsToReceiver(t *testing.T) {
 	p, d := startReceiver(t, true)
+	d.srv.Output = func() receiver.Output { return receiver.Output{Device: "Test Speakers", Muted: true} }
 	s := d.sender("test sender")
 	s.Source = source.Tone{Freq: 440, Gain: 0.5}
 	s.Latency = 40 * time.Millisecond
@@ -114,6 +115,9 @@ func TestStreamsToReceiver(t *testing.T) {
 		t.Errorf("receiver stats %+v", st)
 	}
 	waitFor(t, "stats from the receiver", func() bool { return s.Status().Stats.State != "" })
+	if st := s.Status().Stats; st.Output != "Test Speakers" || !st.Muted {
+		t.Errorf("the receiver's output: %+v", st)
+	}
 }
 
 func TestNewSenderTakesOver(t *testing.T) {

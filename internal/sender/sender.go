@@ -124,9 +124,13 @@ type Sender struct {
 	Latency time.Duration
 	// ForwardVolume applies the Windows volume on the receiver.
 	ForwardVolume bool
-	// OnStatus, if set, is called whenever the status changes.
+	// OnStatus, if set, is called whenever the status changes, never
+	// concurrently.
 	OnStatus func(Status)
 
+	// notify is held while a change is made and reported, so reports come
+	// one at a time and in order.
+	notify sync.Mutex
 	mu     sync.Mutex
 	status Status
 }
@@ -139,6 +143,8 @@ func (s *Sender) Status() Status {
 }
 
 func (s *Sender) update(f func(*Status)) {
+	s.notify.Lock()
+	defer s.notify.Unlock()
 	s.mu.Lock()
 	f(&s.status)
 	st := s.status
@@ -417,12 +423,28 @@ func (s *Sender) stream(ctx context.Context, conn net.Conn, rd *proto.Reader) er
 				}
 			case source.Status:
 				s.update(func(st *Status) { st.Err = e.Err })
+				if e.Err != nil {
+					b, _ := json.Marshal(Problem(e.Err))
+					err = write(proto.MsgCapture, b)
+				}
 			}
 		}
 		if err != nil {
 			return fmt.Errorf("connection lost: %w", err)
 		}
 	}
+}
+
+// Problem describes a capture error for the side playing the audio.
+func Problem(err error) proto.Capture {
+	c := proto.Capture{Error: err.Error()}
+	switch {
+	case errors.Is(err, source.ErrNeedsPermission):
+		c.Problem = proto.CaptureNeedsPermission
+	case errors.Is(err, source.ErrDenied):
+		c.Problem = proto.CaptureDenied
+	}
+	return c
 }
 
 func s16le(samples []int16) []byte {

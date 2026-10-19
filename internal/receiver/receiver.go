@@ -60,7 +60,9 @@ type Server struct {
 	// called name, which shows code. It must return false soon after cancel
 	// is closed. Nil declines every request.
 	Confirm func(name, code string, cancel <-chan struct{}) bool
-	Log     *log.Logger
+	// Output, if set, describes where the audio plays, for senders.
+	Output func() Output
+	Log    *log.Logger
 
 	// current, listener and the connections in handle are the TCP
 	// connections under TLS, which close at once.
@@ -70,10 +72,22 @@ type Server struct {
 	// captureMu is held while Capture runs, so a listener taking over
 	// waits for the previous capture to stop.
 	captureMu sync.Mutex
+	// capture is the running capture's latest problem, for a listener that
+	// waits for captureMu.
+	capture proto.Capture
 	// pairMu is held while pairing, so people are asked one at a time.
 	pairMu     sync.Mutex
 	declinedAt time.Time
 	logged     map[string]time.Time
+}
+
+// Output describes where a receiver plays.
+type Output struct {
+	Device string
+	// Muted is true if the device is muted or at zero volume.
+	Muted bool
+	// Error says why it cannot play.
+	Error string
 }
 
 func (s *Server) Serve(l net.Listener) error {
@@ -196,8 +210,18 @@ func (s *Server) handle(raw net.Conn) {
 		s.mu.Unlock()
 	}()
 
-	err = Play(conn, rd, s.Playout, func() bool { return s.isCurrent(raw) }, func(msg string) {
-		s.Log.Printf("%s: %s", name, msg)
+	var problem proto.Capture
+	err = Play(conn, rd, Player{
+		Playout: s.Playout,
+		Current: func() bool { return s.isCurrent(raw) },
+		Output:  s.Output,
+		Logf:    func(msg string) { s.Log.Printf("%s: %s", name, msg) },
+		OnCapture: func(c proto.Capture) {
+			if c != problem && c.Error != "" {
+				s.Log.Printf("%s: capture: %s", name, c.Error)
+			}
+			problem = c
+		},
 	})
 	s.Log.Printf("%s disconnected: %s", name, describe(err, s.isCurrent(raw)))
 }
@@ -318,7 +342,16 @@ func (s *Server) sendCapture(raw, conn net.Conn, rd *proto.Reader, name string) 
 	}
 	s.listener = raw
 	s.mu.Unlock()
-	s.captureMu.Lock()
+	if !s.captureMu.TryLock() {
+		// The previous listener's capture is still stopping, which can take
+		// until someone answers macOS's permission prompt. Meanwhile keep
+		// this connection alive, and say why nothing comes.
+		stop, stopped := make(chan struct{}), make(chan struct{})
+		go s.keepWaiting(conn, stop, stopped)
+		s.captureMu.Lock()
+		close(stop)
+		<-stopped
+	}
 	defer s.captureMu.Unlock()
 	isListener := func() bool {
 		s.mu.Lock()
@@ -346,6 +379,13 @@ func (s *Server) sendCapture(raw, conn net.Conn, rd *proto.Reader, name string) 
 			lastErr = st.Err.Error()
 			s.Log.Printf("%s: capture: %v", name, st.Err)
 		}
+		var problem proto.Capture
+		if st.Err != nil {
+			problem = sender.Problem(st.Err)
+		}
+		s.mu.Lock()
+		s.capture = problem
+		s.mu.Unlock()
 	})
 	if err == nil {
 		err = io.EOF
@@ -353,13 +393,63 @@ func (s *Server) sendCapture(raw, conn net.Conn, rd *proto.Reader, name string) 
 	s.Log.Printf("%s stopped listening: %s", name, describe(err, isListener()))
 }
 
+// keepWaiting pings a listener that waits for captureMu, and passes on the
+// running capture's problems, until stop is closed.
+func (s *Server) keepWaiting(conn net.Conn, stop <-chan struct{}, stopped chan<- struct{}) {
+	defer close(stopped)
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	var told proto.Capture
+	for {
+		s.mu.Lock()
+		c := s.capture
+		s.mu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		var err error
+		if c != told && c.Error != "" {
+			err = proto.WriteJSON(conn, proto.MsgCapture, c)
+		}
+		told = c
+		if err == nil {
+			err = proto.WriteMsg(conn, proto.MsgPing, nil)
+		}
+		if err != nil {
+			return
+		}
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// Player says how Play plays what a peer sends.
+type Player struct {
+	Playout *playout.Playout
+	// Current reports whether the connection is still the one to play.
+	Current func() bool
+	// Output, if set, describes where the audio plays, for the stats.
+	Output func() Output
+	// Logf logs notable events.
+	Logf func(string)
+	// OnCapture, if set, sees the peer's capture problems, and an empty
+	// Capture when one is over.
+	OnCapture func(proto.Capture)
+}
+
 // Play feeds the audio a peer sends over conn, after the handshake, into
-// p, until the connection fails or current reports that conn was replaced.
-// It reports p's stats back every second, and notable events to logf.
-func Play(conn net.Conn, rd *proto.Reader, p *playout.Playout, current func() bool, logf func(string)) error {
+// pl.Playout, until the connection fails or the connection is replaced. It
+// reports stats back every second.
+func Play(conn net.Conn, rd *proto.Reader, pl Player) error {
 	done := make(chan struct{})
 	defer close(done)
-	go reportStats(conn, p, done)
+	go reportStats(conn, pl.Playout, pl.Output, done)
+	onCapture := func(c proto.Capture) {
+		if pl.OnCapture != nil {
+			pl.OnCapture(c)
+		}
+	}
 
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -367,7 +457,7 @@ func Play(conn net.Conn, rd *proto.Reader, p *playout.Playout, current func() bo
 		if err != nil {
 			return err
 		}
-		if !current() {
+		if !pl.Current() {
 			return errReplaced
 		}
 		switch t {
@@ -376,15 +466,21 @@ func Play(conn net.Conn, rd *proto.Reader, p *playout.Playout, current func() bo
 			if err != nil {
 				return err
 			}
-			p.SetFormat(f.SampleRate, f.Channels)
-			logf(fmt.Sprintf("receiving %d Hz, %d ch", f.SampleRate, f.Channels))
+			pl.Playout.SetFormat(f.SampleRate, f.Channels)
+			pl.Logf(fmt.Sprintf("receiving %d Hz, %d ch", f.SampleRate, f.Channels))
+			onCapture(proto.Capture{})
 		case proto.MsgAudio:
-			p.Write(payload)
+			pl.Playout.Write(payload)
 		case proto.MsgIdle:
-			p.Idle()
+			pl.Playout.Idle()
 		case proto.MsgVolume:
 			if v, err := proto.DecodeVolume(payload); err == nil {
-				p.SetGain(v.Gain)
+				pl.Playout.SetGain(v.Gain)
+			}
+		case proto.MsgCapture:
+			var c proto.Capture
+			if json.Unmarshal(payload, &c) == nil && c.Error != "" {
+				onCapture(c)
 			}
 		case proto.MsgPing:
 		default:
@@ -395,7 +491,7 @@ func Play(conn net.Conn, rd *proto.Reader, p *playout.Playout, current func() bo
 
 var errReplaced = errors.New("replaced by a new connection")
 
-func reportStats(conn net.Conn, p *playout.Playout, done <-chan struct{}) {
+func reportStats(conn net.Conn, p *playout.Playout, output func() Output, done <-chan struct{}) {
 	tick := time.NewTicker(statsInterval)
 	defer tick.Stop()
 	for {
@@ -405,16 +501,20 @@ func reportStats(conn net.Conn, p *playout.Playout, done <-chan struct{}) {
 		case <-tick.C:
 		}
 		st := p.Stats()
-		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		err := proto.WriteJSON(conn, proto.MsgStats, proto.Stats{
+		stats := proto.Stats{
 			State:     st.State.String(),
 			BufferMs:  float64(st.Buffered) / float64(time.Millisecond),
 			TargetMs:  float64(st.Target) / float64(time.Millisecond),
 			DriftPPM:  st.DriftPPM,
 			Underruns: st.Underruns,
 			Skips:     st.Skips,
-		})
-		if err != nil {
+		}
+		if output != nil {
+			o := output()
+			stats.Output, stats.Muted, stats.OutputError = o.Device, o.Muted, o.Error
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if err := proto.WriteJSON(conn, proto.MsgStats, stats); err != nil {
 			conn.Close()
 			return
 		}

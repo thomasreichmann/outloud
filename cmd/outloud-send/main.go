@@ -198,6 +198,14 @@ func stream(ctx context.Context, k keys, src source.Source, target sender.Target
 				} else {
 					logf("idle")
 				}
+			case st.Stats.OutputError != last.Stats.OutputError && st.Stats.OutputError != "":
+				logf("the receiver cannot play: %s", st.Stats.OutputError)
+			case st.Stats.Muted != last.Stats.Muted && st.State == sender.Connected:
+				if st.Stats.Muted {
+					logf("the receiver's output (%s) is muted", st.Stats.Output)
+				} else {
+					logf("the receiver's output is no longer muted")
+				}
 			case verbose && st.State == sender.Connected && time.Since(lastStats) >= 5*time.Second:
 				lastStats = time.Now()
 				r := st.Stats
@@ -251,7 +259,15 @@ func listen(ctx context.Context, k keys, target sender.Target, latency time.Dura
 		Latency:  latency,
 		Log:      log.New(os.Stdout, "", log.Ltime),
 		OnStatus: func(st listener.Status) {
+			if st.Capture != last.Capture && st.State == sender.Connected {
+				if st.Capture.Error != "" {
+					logf("%q cannot share its sound: %s", st.Receiver, st.Capture.Error)
+				} else if last.Capture.Error != "" {
+					logf("%q shares its sound again", st.Receiver)
+				}
+			}
 			if st.State == last.State && st.Receiver == last.Receiver {
+				last = st
 				return
 			}
 			switch st.State {
