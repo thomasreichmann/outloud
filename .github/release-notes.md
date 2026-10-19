@@ -1,3 +1,15 @@
+## What's new in 0.2.0
+
+- **Hear the Mac on the PC.** Under **Hear on this PC** in the tray menu,
+  tick the Mac to play its sound on the PC, independently of streaming the
+  PC to the Mac. Needs macOS 14.2 or later, and macOS asks once for
+  permission to record the Mac's audio.
+- Both directions at once do not echo: each side leaves out what the other
+  sends it (on the PC, this needs Windows 11).
+- The Mac receiver now installs as `Outloud.app`. Update both the PC and the
+  Mac with the commands below; older receivers do not appear under **Hear on
+  this PC**.
+
 ## Install
 
 **On the Windows PC**, in PowerShell:

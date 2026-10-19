@@ -118,8 +118,12 @@ Flags:
 	switch *capture {
 	case "system":
 		var note string
-		if own, note = systemCapture(); own != nil {
+		own, note = systemCapture()
+		switch {
+		case own != nil:
 			log.Printf("PCs can listen to this computer's sound (%s)", note)
+		case note != "":
+			log.Printf("PCs cannot listen to this computer's sound: %s", note)
 		}
 	case "tone":
 		own = source.Tone{Freq: 660, Gain: 0.1}

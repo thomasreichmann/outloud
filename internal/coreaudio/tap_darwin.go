@@ -157,6 +157,9 @@ func load() error {
 	return loadErr
 }
 
+// Available reports why this Mac cannot capture its sound, or nil if it can.
+func Available() error { return load() }
+
 // Permission reports whether macOS lets this process record system audio:
 // "granted", "denied" or "not decided".
 func Permission() string {

@@ -8,6 +8,10 @@ plugged in. Latency is around a tenth of a second, the two computers'
 clocks are kept in step so the sound never drifts or stutters over time, and
 neither side needs admin rights, a driver or an account.
 
+It works the other way too: with its own switch, the PC can play what the
+Mac plays, so you can hear the Mac on the PC's headphones. Either direction,
+or both at once.
+
 ```
  Windows PC                                        Mac
  ┌──────────────────────────────┐                  ┌──────────────────────────────┐
@@ -19,7 +23,8 @@ neither side needs admin rights, a driver or an account.
 ```
 
 **Requirements:** an up-to-date Windows 10 or 11 on x64, and macOS 12 or
-later on Apple silicon or Intel, on the same local network.
+later on Apple silicon or Intel, on the same local network. Hearing the Mac
+on the PC needs macOS 14.2 or later.
 
 ## Install
 
@@ -46,9 +51,11 @@ curl -fsSL https://github.com/thomasreichmann/outloud/releases/latest/download/i
 ```
 
 Either way the receiver starts right away and at every login. Allow it when
-macOS asks whether `outloud-receiver` may accept incoming connections or use
-the local network, and allow Outloud when Windows asks about network access
-(private networks are enough).
+macOS asks whether Outloud may accept incoming connections or use the local
+network, and allow Outloud when Windows asks about network access (private
+networks are enough). The first time the PC listens to the Mac, macOS also
+asks whether Outloud may record the Mac's audio; allow that to hear the Mac
+on the PC.
 
 **3. Pick the Mac** under **Speakers** in the tray menu. If it is the only one
 on the network, a fresh install picks it by itself.
@@ -64,6 +71,7 @@ Gatekeeper do not interfere; the zip's installer removes that mark itself.
 | **Speakers** | the receivers on the network; tick one to stream to it |
 | **Connect by address…** | for a Mac that is not listed: use the address its receiver prints, like `Alexs-MacBook-Pro.local` |
 | **Stop streaming** | |
+| **Hear on this PC** | tick a Mac to play its sound on this PC; tick it again to stop. Independent of streaming |
 | **Latency** | how much audio the Mac buffers. *Low* (40 ms) keeps video in sync on a good network; *Safe* (200 ms) survives weak Wi-Fi |
 | **Capture from** | the default playback device (follows changes), or a fixed one |
 | **Follow Windows volume** | apply the PC's volume and mute on the Mac (off by default) |
@@ -75,6 +83,20 @@ sound waves while sound is flowing. Nothing is sent while nothing plays, and
 after 10 s of silence the Mac lets go of its audio device so it can sleep. If
 the network hiccups and the sound drops out, the Mac buffers a little more
 for a while, then creeps back to the latency you chose.
+
+### Hearing the Mac on the PC
+
+Under **Hear on this PC**, tick the Mac. Everything the Mac plays then also
+plays on the PC's default output, with the same **Latency**. The Mac keeps
+playing it too; turn the Mac down to hear it only on the PC (the Mac's volume
+does not change what the PC gets). While a PC listens, macOS may show its
+recording indicator in the menu bar.
+
+Both directions can be on at once without the sound going round in circles:
+the Mac never sends back what the PC sends it, and the PC leaves the Mac's
+sound out of what it sends to the Mac. Leaving it out needs Windows 11
+(strictly, Windows build 20348 or later); on older Windows, with both
+directions on, the Mac hears itself again a moment later.
 
 ### Not hearing everything twice
 
@@ -101,6 +123,8 @@ outloud-send devices                      playback devices
 outloud-send meter                        captured levels and the device's real clock rate
 outloud-send -to "Kitchen Mac" -v         stream, printing the Mac's buffer statistics
 outloud-send -to 192.168.1.20 -tone       send a test beep instead of capturing
+outloud-send listen -to "Kitchen Mac"     play the Mac's sound on this PC
+outloud-send -to "Kitchen Mac" -hear      both directions at once
 ```
 
 On the Mac, `outloud-receiver` runs in the foreground when started without
@@ -126,6 +150,13 @@ On the Mac, `outloud-receiver` runs in the foreground when started without
   PC's volume. Turn the PC up, or the option off.
 - **It stops when the Mac sleeps.** A sleeping Mac cannot play. Keep it on
   power with the lid open, or prevent sleep in System Settings.
+- **The Mac is missing under Hear on this PC.** Update the Mac's receiver
+  (step 2 above): only receivers from 0.2.0 on, on macOS 14.2 or later, can
+  share the Mac's sound.
+- **Hearing the Mac stays silent.** macOS may not let Outloud record the
+  Mac's audio: in System Settings ▸ Privacy & Security ▸ Screen & System
+  Audio Recording, allow Outloud under *System Audio Recording Only*. The
+  Mac's log says so too. macOS may ask again after the receiver is updated.
 
 Logs: `%LOCALAPPDATA%\Outloud\Outloud.log` (tray menu ▸ **Open log**) and
 `~/Library/Logs/Outloud.log` on the Mac.
@@ -134,14 +165,19 @@ Logs: `%LOCALAPPDATA%\Outloud\Outloud.log` (tray menu ▸ **Open log**) and
 
 - **PC:** Settings ▸ Apps ▸ Installed apps ▸ Outloud ▸ Uninstall. This also
   removes its settings and logs.
-- **Mac:** `~/Library/Application\ Support/Outloud/outloud-receiver uninstall`
+- **Mac:** `~/Library/Application\ Support/Outloud/outloud-receiver uninstall`.
+  This removes the receiver (`Outloud.app` in that folder) and its login
+  item; the log stays.
 
 ## Limitations
 
 - Audio is sent unencrypted, and the receiver plays for any sender on the
-  network. Use it on networks you trust.
-- One sender at a time: a second PC takes over from the first.
-- The binaries are not code-signed.
+  network, and sends the Mac's sound to any PC that asks. Use it on networks
+  you trust.
+- One sender at a time: a second PC takes over from the first. Likewise one
+  PC at a time can hear the Mac.
+- The binaries are not code-signed, so macOS may ask again for permission to
+  record the Mac's audio after the receiver is updated.
 
 ## How it works
 
@@ -153,16 +189,27 @@ Hermite interpolation), so the two sound cards' clocks never drift apart.
 Receivers advertise themselves through the Mac's mDNSResponder, and the PC
 finds them through Windows' DNS-SD API.
 
+To hear the Mac, the PC opens a second connection and asks the receiver to
+listen. The receiver captures the Mac's output with a Core Audio process tap
+that leaves out its own playback, and streams it back with the same messages;
+the PC plays it through the same jitter buffer. While it does, the PC
+captures with process loopback, which leaves out Outloud's own playback. The
+receiver installs as an app bundle, because macOS asks for permission to
+record audio on behalf of apps.
+
 | path | |
 |---|---|
 | `cmd/outloud` | Windows tray app |
 | `cmd/outloud-send` | Windows command-line sender |
 | `cmd/outloud-receiver` | Mac receiver, with `install` (LaunchAgent) |
-| `internal/wasapi` | WASAPI loopback capture |
+| `internal/wasapi` | WASAPI loopback and process loopback capture |
+| `internal/coreaudio` | the Mac's own sound, through a process tap |
 | `internal/playout` | jitter buffer, drift-correcting resampler, adaptive latency |
+| `internal/playback` | plays a playout on the default output, on either side |
 | `internal/proto` | wire protocol |
 | `internal/mdns` | discovery and advertising |
 | `internal/sender`, `internal/receiver` | connection handling on each side |
+| `internal/listener` | the PC's side of hearing the Mac |
 | `internal/macsetup` | serves the receiver and `install.sh` to a Mac |
 
 ## Building

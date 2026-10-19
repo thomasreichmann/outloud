@@ -16,8 +16,12 @@ func startDevice(src io.Reader, p *playout.Playout, bufferSize time.Duration) (o
 	return playback.Open(src, p, outputRate, bufferSize)
 }
 
-// systemCapture is this Mac's own sound, for PCs that listen.
+// systemCapture is this Mac's own sound, for PCs that listen, with a note
+// for the log; or nil and why not.
 func systemCapture() (source.Source, string) {
+	if err := coreaudio.Available(); err != nil {
+		return nil, err.Error()
+	}
 	return &coreaudio.Tap{}, "recording permission: " + coreaudio.Permission()
 }
 
