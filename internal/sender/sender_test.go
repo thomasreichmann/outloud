@@ -266,9 +266,12 @@ func TestPair(t *testing.T) {
 	if mac != "test receiver" || pcCode == "" || pcCode != macCode {
 		t.Errorf("paired with %q, codes %q and %q", mac, pcCode, macCode)
 	}
-	if !d.pcPeers.Paired(d.mac.ID) || !d.macPeers.Paired(d.pc.ID) {
-		t.Fatal("a side did not remember the other")
+	if !d.pcPeers.Paired(d.mac.ID) {
+		t.Fatal("the PC did not remember the receiver")
 	}
+	// The receiver remembers the PC once it has read the PC's answer, which
+	// can be just after Pair returns.
+	waitFor(t, "the receiver to remember the PC", func() bool { return d.macPeers.Paired(d.pc.ID) })
 	s := d.sender("pc")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
