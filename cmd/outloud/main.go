@@ -701,6 +701,8 @@ func (a *app) refreshStatus() {
 			return "Not paired with " + name
 		case errors.Is(err, sender.ErrOutdated):
 			return name + " runs an older Outloud: set it up again"
+		case errors.Is(err, sender.ErrNewer):
+			return name + " runs a newer Outloud: update this PC"
 		}
 		return ""
 	}
@@ -793,10 +795,14 @@ func (a *app) refreshMenu() {
 	defer a.mu.Unlock()
 	cfg := a.cfg
 
-	// Receivers that speak an older protocol need updating before use.
+	// A receiver that speaks another protocol version works only once one
+	// side is updated.
 	label := func(s mdns.Service) string {
-		if !slices.Contains(s.TXT, proto.VersionTXT) {
+		switch v := proto.TXTVersion(s.TXT); {
+		case v < proto.Version:
 			return s.Instance + " (needs update)"
+		case v > proto.Version:
+			return s.Instance + " (update this PC)"
 		}
 		return s.Instance
 	}

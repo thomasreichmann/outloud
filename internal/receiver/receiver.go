@@ -174,6 +174,19 @@ func (s *Server) handle(raw net.Conn) {
 		s.logOnce("hangup "+peerID, "%s hung up after seeing this computer's key: it has not paired with it", remote)
 		return
 	}
+	var verr *proto.VersionError
+	if errors.As(err, &verr) {
+		// The Hello in reply carries this side's version, so the sender can
+		// say which one needs updating.
+		_ = proto.WriteJSON(conn, proto.MsgHello, s.hello(proto.RefusedVersion))
+		which := "this computer"
+		if verr.Peer < proto.Version {
+			which = "it"
+		}
+		s.logOnce("version "+peerID, "turned away %s at %s: it runs %s, which speaks protocol version %d, not %d; update %s",
+			hello.Name, remote, hello.Software, verr.Peer, proto.Version, which)
+		return
+	}
 	if err != nil {
 		s.Log.Printf("rejected connection from %s: %v", remote, err)
 		return

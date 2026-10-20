@@ -325,6 +325,115 @@ func TestOldSender(t *testing.T) {
 	}
 }
 
+// fakeReceiver runs a receiver of the test's making, with key mac: it does
+// the handshake, reads the sender's Hello and hands the connection to serve.
+func fakeReceiver(t *testing.T, mac *pairing.Identity, serve func(net.Conn, *proto.Reader)) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			raw, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer raw.Close()
+				if proto.ReadMagic(raw) != nil || proto.WriteMagic(raw) != nil {
+					return
+				}
+				conn := pairing.Server(raw, mac)
+				if conn.Handshake() != nil {
+					return
+				}
+				rd := proto.NewReader(bufio.NewReader(conn))
+				if _, err := rd.ReadHello(); err == nil {
+					serve(conn, rd)
+				}
+			}()
+		}
+	}()
+	return l.Addr().String()
+}
+
+// TestNewerReceiver checks that a receiver of a later protocol version is
+// reported as such, so the PC can say that it is the one to update.
+func TestNewerReceiver(t *testing.T) {
+	mac := identity(t)
+	addr := fakeReceiver(t, mac, func(conn net.Conn, _ *proto.Reader) {
+		proto.WriteJSON(conn, proto.MsgHello, proto.Hello{Version: proto.Version + 1, Name: "future mac", Refused: proto.RefusedVersion})
+	})
+	_, err := sender.Dial(context.Background(), addr, proto.Hello{Name: "pc"}, identity(t), pairing.MemoryStore(pairing.Peer{ID: mac.ID}))
+	if !errors.Is(err, sender.ErrNewer) {
+		t.Errorf("got %v", err)
+	}
+}
+
+// TestNewerSender checks that a sender of a later protocol version is told
+// this receiver's version rather than just dropped.
+func TestNewerSender(t *testing.T) {
+	_, d := startReceiver(t, true)
+	raw, err := net.Dial("tcp", d.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	raw.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := proto.WriteMagic(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := proto.ReadMagic(raw); err != nil {
+		t.Fatal(err)
+	}
+	conn := pairing.Client(raw, d.pc)
+	if err := conn.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	proto.WriteJSON(conn, proto.MsgHello, proto.Hello{Version: proto.Version + 1, Name: "future pc"})
+	h, err := proto.NewReader(conn).ReadHello()
+	if err != nil || h.Version != proto.Version || h.Refused != proto.RefusedVersion {
+		t.Errorf("answered %+v, %v", h, err)
+	}
+}
+
+// TestUnknownMessages checks that each side skips messages it does not
+// know, as a later 1.x release may send.
+func TestUnknownMessages(t *testing.T) {
+	// From the sender, to a receiver.
+	p, d := startReceiver(t, true)
+	c, err := sender.Dial(context.Background(), d.addr, proto.Hello{Name: "pc"}, d.pc, d.pcPeers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	proto.WriteMsg(c, proto.MsgFormat, proto.Format{SampleRate: 48000, Channels: 2}.Encode())
+	proto.WriteMsg(c, 99, []byte("something new"))
+	proto.WriteMsg(c, proto.MsgAudio, make([]byte, 4*4800))
+	waitFor(t, "audio after an unknown message", func() bool { return p.Stats().Buffered > 0 })
+
+	// From the receiver, to a sender.
+	mac := identity(t)
+	addr := fakeReceiver(t, mac, func(conn net.Conn, rd *proto.Reader) {
+		proto.WriteJSON(conn, proto.MsgHello, proto.Hello{Version: proto.Version, Name: "mac"})
+		proto.WriteMsg(conn, 99, []byte("something new"))
+		proto.WriteJSON(conn, proto.MsgStats, proto.Stats{State: "playing", TargetMs: 40})
+		for {
+			if _, _, err := rd.Next(); err != nil {
+				return
+			}
+		}
+	})
+	s := &sender.Sender{
+		Source: source.Tone{Freq: 440, Gain: 0.1}, Target: sender.Target{Addr: addr}, Name: "pc",
+		Identity: identity(t), Peers: pairing.MemoryStore(pairing.Peer{ID: mac.ID}),
+	}
+	defer run(s)()
+	waitFor(t, "stats after an unknown message", func() bool { return s.Status().Stats.TargetMs == 40 })
+}
+
 // TestOldReceiver checks that a receiver hanging up on this protocol's
 // magic, as older ones do, is reported as outdated.
 func TestOldReceiver(t *testing.T) {

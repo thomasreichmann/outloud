@@ -199,9 +199,12 @@ func (s *Sender) Run(ctx context.Context) error {
 }
 
 var (
-	// ErrOutdated means the receiver closed the connection on seeing this
-	// protocol version, which only older receivers do.
+	// ErrOutdated means the receiver speaks an older protocol version, or
+	// closed the connection on seeing this one, as receivers before protocol
+	// version 2 do.
 	ErrOutdated = errors.New("the receiver runs an older version of Outloud, which needs updating")
+	// ErrNewer means the receiver speaks a newer protocol version.
+	ErrNewer = errors.New("the receiver runs a newer version of Outloud; update this PC")
 	// ErrNoCapture means the receiver cannot share its own sound.
 	ErrNoCapture = errors.New("the receiver cannot share its sound")
 	// ErrBusy means the receiver is pairing with someone else.
@@ -297,7 +300,13 @@ func Dial(ctx context.Context, addr string, hello proto.Hello, id *pairing.Ident
 	}
 	rd := proto.NewReader(bufio.NewReader(conn))
 	peer, err := rd.ReadHello()
-	if err != nil {
+	var verr *proto.VersionError
+	switch {
+	case errors.As(err, &verr) && verr.Peer > proto.Version:
+		return fail(ErrNewer)
+	case errors.As(err, &verr):
+		return fail(ErrOutdated)
+	case err != nil:
 		return fail(err)
 	}
 	switch peer.Refused {

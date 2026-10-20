@@ -304,6 +304,9 @@ macOS, which signs the Mac receiver with the certificate in the
 `MAC_SIGN_P12` secret. Running the Release workflow by hand builds and signs
 without publishing.
 
+[COMPATIBILITY.md](COMPATIBILITY.md) describes what every 1.x release keeps
+the same, the protocol included, so that any 1.x PC works with any 1.x Mac.
+
 ## License
 
 [MIT](LICENSE)

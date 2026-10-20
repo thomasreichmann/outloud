@@ -16,6 +16,10 @@
 //
 // Audio is always interleaved signed 16-bit little-endian PCM at the rate and
 // channel count announced by the most recent Format message.
+//
+// Every 1.x release speaks this protocol unchanged, apart from additions
+// older peers can ignore; COMPATIBILITY.md at the top of the repository says
+// what may change, and compat_test.go pins the rest.
 package proto
 
 import (
@@ -26,6 +30,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -151,6 +156,9 @@ const (
 	// RefusedInUse: the sender asked IfFree, and another device, named in
 	// User, is playing through the receiver or listening to it.
 	RefusedInUse = "in use"
+	// RefusedVersion: the sender speaks another protocol version. The
+	// Hello's Version is the receiver's.
+	RefusedVersion = "version"
 )
 
 // CaptureTXT is in the TXT record of receivers that can stream their own
@@ -160,6 +168,26 @@ const CaptureTXT = "capture=1"
 // VersionTXT is in the TXT record of receivers that speak this protocol
 // version.
 var VersionTXT = "v=" + strconv.Itoa(Version)
+
+// TXTVersion returns the protocol version a receiver's TXT record
+// announces. Receivers of version 1 announced none.
+func TXTVersion(txt []string) int {
+	for _, kv := range txt {
+		if v, ok := strings.CutPrefix(kv, "v="); ok {
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
+			}
+		}
+	}
+	return 1
+}
+
+// VersionError means the peer speaks another protocol version, Peer.
+type VersionError struct{ Peer int }
+
+func (e *VersionError) Error() string {
+	return fmt.Sprintf("peer speaks protocol version %d, this build speaks %d", e.Peer, Version)
+}
 
 // Stats is the playing side's view of the stream, reported back to the side
 // sending it.
@@ -317,7 +345,9 @@ func (r *Reader) Next() (MsgType, []byte, error) {
 	return MsgType(r.hdr[0]), r.buf, nil
 }
 
-// ReadHello reads a message that must be a Hello.
+// ReadHello reads a message that must be a Hello. If the peer speaks another
+// protocol version, the error is a *VersionError, and the Hello is returned
+// too.
 func (r *Reader) ReadHello() (Hello, error) {
 	t, p, err := r.Next()
 	if err != nil {
@@ -331,7 +361,7 @@ func (r *Reader) ReadHello() (Hello, error) {
 		return Hello{}, fmt.Errorf("bad hello: %w", err)
 	}
 	if h.Version != Version {
-		return Hello{}, fmt.Errorf("peer speaks protocol version %d, this build speaks %d", h.Version, Version)
+		return h, &VersionError{Peer: h.Version}
 	}
 	return h, nil
 }
