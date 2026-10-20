@@ -1,30 +1,31 @@
-## What's new in 0.5.0
+## Outloud 1.0
 
-- **Two PCs no longer take a Mac from each other in turn.** Choosing a Mac
-  that another PC uses takes it over. The other PC then waits, says which
-  PC has the Mac, and carries on by itself once the Mac is free. Clicking
-  that line in its menu takes the Mac back.
-- **Updates come to you.** Once a day the tray asks GitHub whether a new
-  release is out, and if so offers to install it, from the top of its menu.
-  If the Mac runs an older Outloud, the menu says so and shows how to update
-  it. **Check for updates** in the menu turns this off.
-- **A version mismatch says which side to update.** This matters for future
-  releases: a PC told that its Mac is newer says "update this PC".
-- **Requirements, corrected:** Outloud needs macOS 13 or later, and always
-  has; earlier notes said 12. The installer now says so on an older Mac.
-- **Smaller fixes:**
-  - The Mac's log no longer grows without end; it stays under about 2 MB.
-  - The tray no longer logs errors when it quits.
-  - `outloud-send -name` sets the name a Mac shows for this PC.
+The first stable release. From now on, every 1.x release works with every
+other: any 1.x PC with any 1.x Mac. Each one also reads the settings, keys
+and pairings an older one left behind.
+[COMPATIBILITY.md](https://github.com/thomasreichmann/outloud/blob/v1.0.0/COMPATIBILITY.md)
+says exactly what that covers.
 
-**Update both the PC and the Mac.** The takeover fix needs both; 0.5.0
-works with 0.3 and 0.4, so one side at a time is fine. Updating a Mac that
-runs 0.4.0 keeps its permission to record. Coming from 0.3 or earlier, macOS
-asks once more.
+What Outloud does:
+- **A Mac becomes the PC's speaker.** It plays whatever the PC plays, over
+  the local network, about a tenth of a second behind, and the two clocks
+  are kept in step so the sound never drifts.
+- **The PC can hear the Mac,** in either direction or both at once (macOS
+  14.2 or later).
+- **Paired and encrypted.** A Mac only plays for, and only shares its sound
+  with, PCs it is paired with. Pairing means comparing a six-digit code once,
+  or nothing at all when the PC sets the Mac up.
+- **Little to look after.** Setting up a Mac is one Terminal command from
+  the tray menu. The tray offers new releases, and the Mac keeps its
+  permission to record across updates. When two PCs share a Mac, the one
+  that took it last keeps it, and the other waits its turn.
 
-**Coming from 0.2?** 0.3 and later cannot talk to 0.2, so update both with
-the commands below. The first time the updated PC picks the Mac, the two
-pair.
+Outloud 1.0 is 0.5.0 with this promise; nothing else changed.
+
+**Updating:** from 0.4 or 0.5 nothing is asked, so the tray's **Update to
+Outloud 1.0.0…** and the commands below are all it takes. From 0.3, macOS
+asks once more whether Outloud may record the Mac's sound. From 0.2, update
+both the PC and the Mac: the first time the PC picks the Mac, the two pair.
 
 ## Install
 
