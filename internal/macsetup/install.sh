@@ -12,6 +12,13 @@
 set -eu
 BASE="__BASE__"
 PIN="__PIN__"
+# Programs built with Go 1.27 need macOS 13.
+case "$(sw_vers -productVersion)" in
+	[0-9].* | 1[0-2].*)
+		echo "Outloud needs macOS 13 or later; this Mac has $(sw_vers -productVersion)." >&2
+		exit 1
+		;;
+esac
 case "$(uname -m)" in
 	arm64) ARCH=arm64 ;;
 	x86_64) ARCH=amd64 ;;

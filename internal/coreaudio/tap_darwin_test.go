@@ -2,8 +2,11 @@ package coreaudio
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -118,6 +121,40 @@ func TestPlayers(t *testing.T) {
 		t.Fatal(err)
 	}
 	await("afplay done", func() bool { pids, _ := players(); return !pids[pid] })
+}
+
+// TestLoad checks, on any Mac that can capture, that every function the
+// tap uses is there, and that the watch for processes that play works. It
+// plays nothing and asks for nothing, so it runs on build machines too, of
+// both kinds.
+func TestLoad(t *testing.T) {
+	v, err := syscall.Sysctl("kern.osproductversion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var major, minor int
+	fmt.Sscanf(v, "%d.%d", &major, &minor)
+	err = load()
+	if major < 14 || major == 14 && minor < 2 {
+		if err == nil {
+			t.Errorf("macOS %s can capture?", v)
+		}
+		t.Skipf("macOS %s cannot capture: %v", v, err)
+	}
+	if err != nil {
+		t.Fatalf("macOS %s: %v", v, err)
+	}
+	w, err := watchPlayers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.close()
+	playing, err := w.playing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("macOS %s on %s: %d processes use Core Audio, another plays: %v, permission %s",
+		v, runtime.GOARCH, len(w.procs), playing, Permission())
 }
 
 // TestOutput reads the default output's name and mute state. It plays

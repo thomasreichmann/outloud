@@ -10,7 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Besides the latest: Windows build 20348, the oldest Windows here
+        # and the first that can leave Outloud's own sound out of a capture;
+        # an Intel Mac; and the oldest macOS here, 14 (Go needs 13).
+        os: [ubuntu-latest, windows-latest, windows-2022, macos-latest, macos-15-intel, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

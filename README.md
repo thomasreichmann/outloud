@@ -22,9 +22,11 @@ or both at once.
  └──────────────────────────────┘   Bonjour        └──────────────────────────────┘
 ```
 
-**Requirements:** an up-to-date Windows 10 or 11 on x64, and macOS 12 or
+**Requirements:** an up-to-date Windows 10 or 11 on x64, and macOS 13 or
 later on Apple silicon or Intel, on the same local network. Hearing the Mac
-on the PC needs macOS 14.2 or later.
+on the PC needs macOS 14.2 or later. Tested on Windows 11 and Windows Server
+2022 and 2025, and on macOS 14, 15 (on Intel), 26 and 27. Windows 10 and
+macOS 13 should work, but nothing tests them any more.
 
 ## Install
 
