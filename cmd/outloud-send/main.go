@@ -47,6 +47,9 @@ This PC's key and paired receivers are shared with the Outloud tray app.
 Flags:
 `
 
+// pcName is what receivers call this PC.
+var pcName string
+
 func main() {
 	cmd := ""
 	args := os.Args[1:]
@@ -67,7 +70,11 @@ func main() {
 	verbose := fs.Bool("v", false, "print the receiver's buffer statistics every 5 s")
 	browseType := fs.String("browse-type", proto.ServiceType, "service type for list (diagnostics)")
 	port := fs.Int("port", macsetup.DefaultPort, "port for serve-mac")
+	fs.StringVar(&pcName, "name", "", "what receivers call this PC (default: the computer's name)")
 	fs.Parse(args)
+	if pcName == "" {
+		pcName, _ = os.Hostname()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -156,7 +163,7 @@ func parseTarget(s string) sender.Target {
 }
 
 func stream(ctx context.Context, k keys, src source.Source, target sender.Target, latency time.Duration, volume, verbose bool) error {
-	name, _ := os.Hostname()
+	name := pcName
 	var last sender.Status
 	var lastStats time.Time
 	s := &sender.Sender{
@@ -248,7 +255,7 @@ func listen(ctx context.Context, k keys, target sender.Target, latency time.Dura
 		}
 	}()
 
-	name, _ := os.Hostname()
+	name := pcName
 	var last listener.Status
 	l := &listener.Listener{
 		Target:   target,
@@ -359,7 +366,7 @@ func meter(ctx context.Context, src source.Source) error {
 }
 
 func serveMac(ctx context.Context, k keys, port int) error {
-	name, _ := os.Hostname()
+	name := pcName
 	s := &macsetup.Server{
 		Port: port, Identity: k.id, Peers: k.peers, Name: name, Logf: logf,
 		OnPaired: func(p pairing.Peer) { logf("paired with %q", p.Name) },
@@ -381,7 +388,7 @@ func pair(ctx context.Context, k keys, target sender.Target) error {
 	if err != nil {
 		return err
 	}
-	name, _ := os.Hostname()
+	name := pcName
 	logf("pairing with the receiver at %s ...", addr)
 	mac, err := sender.Pair(ctx, addr, name, k.id, k.peers, func(receiver, code string, cancel <-chan struct{}) bool {
 		fmt.Printf("\n%q now asks whether to pair with this PC. Allow it there if it shows\n\n    %s\n\n"+
