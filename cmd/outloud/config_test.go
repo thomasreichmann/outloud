@@ -45,7 +45,8 @@ func TestConfigFormat(t *testing.T) {
 	}
 
 	t.Setenv("APPDATA", t.TempDir())
-	all := Config{Receiver: "r", Address: "a", Device: "d", LatencyMs: 1, ForwardVolume: true, Hear: "h", HearAddress: "ha"}
+	all := Config{Receiver: "r", Address: "a", Device: "d", LatencyMs: 1, ForwardVolume: true, Hear: "h", HearAddress: "ha",
+		NoUpdateCheck: true}
 	if err := saveConfig(all); err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestConfigFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := slices.Sorted(maps.Keys(fields))
-	want := []string{"address", "device", "forward_volume", "hear", "hear_address", "latency_ms", "receiver"}
+	want := []string{"address", "device", "forward_volume", "hear", "hear_address", "latency_ms", "no_update_check", "receiver"}
 	if !reflect.DeepEqual(keys, want) {
 		t.Errorf("saved the fields %v, want %v", keys, want)
 	}

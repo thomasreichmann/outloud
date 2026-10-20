@@ -80,6 +80,7 @@ removes that mark itself.
 | **Capture from** | the default playback device (follows changes), or a fixed one |
 | **Follow Windows volume** | apply the PC's volume and mute on the Mac (off by default) |
 | **Start with Windows** | |
+| **Check for updates** | once a day, ask GitHub whether a new release is out (on by default) |
 | **Paired Macs** | the Macs this PC is paired with; choose one to forget it |
 | **Set up a Mac…** | serve the receiver installer to a Mac on the network, pairing the two |
 
@@ -88,6 +89,11 @@ sound waves while sound is flowing. Nothing is sent while nothing plays, and
 after 10 s of silence the Mac lets go of its audio device so it can sleep. If
 the network hiccups and the sound drops out, the Mac buffers a little more
 for a while, then creeps back to the latency you chose.
+
+When a new release is out, **Update to Outloud …** appears at the top of the
+menu: it installs the release on the PC, with the same installer as above. If
+the Mac in use runs an older Outloud than the PC or the latest release, the
+menu says so, and shows how to update it.
 
 One PC at a time streams to a Mac, and one hears it. Choosing a Mac that
 another PC is using takes it over. The other PC then waits: its menu says

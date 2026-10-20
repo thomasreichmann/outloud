@@ -29,6 +29,8 @@ type Config struct {
 	// HearAddress is that speaker's last known address, for when it cannot
 	// be discovered.
 	HearAddress string `json:"hear_address,omitempty"`
+	// NoUpdateCheck stops asking GitHub whether a new release is out.
+	NoUpdateCheck bool `json:"no_update_check,omitempty"`
 }
 
 func (c Config) streaming() bool { return c.Receiver != "" || c.Address != "" }

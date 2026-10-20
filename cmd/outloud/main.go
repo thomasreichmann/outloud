@@ -27,6 +27,7 @@ import (
 	"github.com/thomasreichmann/outloud/internal/playout"
 	"github.com/thomasreichmann/outloud/internal/proto"
 	"github.com/thomasreichmann/outloud/internal/sender"
+	"github.com/thomasreichmann/outloud/internal/update"
 	"github.com/thomasreichmann/outloud/internal/version"
 	"github.com/thomasreichmann/outloud/internal/wasapi"
 )
@@ -96,6 +97,12 @@ type app struct {
 	hearable   []speaker // what the hear items currently show
 	hearStatus listener.Status
 
+	// latest is the latest release, once GitHub has said, and macUpdate the
+	// Mac that the Mac's update item is about. checkNow asks for a check.
+	latest    update.Release
+	macUpdate macUpdate
+	checkNow  chan struct{}
+
 	restartMu sync.Mutex
 	running   *run
 	hearing   *run
@@ -104,6 +111,8 @@ type app struct {
 	playout *playout.Playout
 	out     *playback.Device
 
+	mUpdate     *systray.MenuItem
+	mMacUpdate  *systray.MenuItem
 	mStatus     *systray.MenuItem
 	mHearStatus *systray.MenuItem
 	mSpeakers   []*systray.MenuItem
@@ -116,6 +125,7 @@ type app struct {
 	mDevices    []*systray.MenuItem
 	mVolume     *systray.MenuItem
 	mAutostart  *systray.MenuItem
+	mUpdates    *systray.MenuItem
 	mPaired     []*systray.MenuItem
 	mNoPaired   *systray.MenuItem
 }
@@ -125,7 +135,7 @@ func main() {
 		messageBox("Outloud", "Outloud is already running. Its speaker icon is in the notification area of the taskbar.", mbInfo)
 		return
 	}
-	a := &app{}
+	a := &app{checkNow: make(chan struct{}, 1)}
 	a.log, a.logPath = openLog()
 	a.hostname, _ = os.Hostname()
 	var err error
@@ -176,6 +186,12 @@ func (a *app) ready() {
 
 	title := systray.AddMenuItem(version.String(), "")
 	title.Disable()
+	a.mUpdate = systray.AddMenuItem("", "Download and install the new release")
+	a.mUpdate.Hide()
+	onClick(a.mUpdate, a.updatePC)
+	a.mMacUpdate = systray.AddMenuItem("", "How to update the Mac")
+	a.mMacUpdate.Hide()
+	onClick(a.mMacUpdate, a.updateMac)
 	// The status items are enabled while another PC uses the Mac; clicking
 	// one then takes the Mac over.
 	a.mStatus = systray.AddMenuItem("Starting…", "")
@@ -234,6 +250,8 @@ func (a *app) ready() {
 	onClick(a.mVolume, func() { a.update(func(c *Config) { c.ForwardVolume = !c.ForwardVolume }) })
 	a.mAutostart = systray.AddMenuItemCheckbox("Start with Windows", "", autostartEnabled())
 	onClick(a.mAutostart, a.toggleAutostart)
+	a.mUpdates = systray.AddMenuItemCheckbox("Check for updates", "Ask GitHub once a day whether a new release is out", false)
+	onClick(a.mUpdates, a.toggleUpdateCheck)
 	systray.AddSeparator()
 
 	pairedMenu := systray.AddMenuItem("Paired Macs", "The Macs this PC can use")
@@ -256,6 +274,7 @@ func (a *app) ready() {
 	a.refreshMenu()
 	go a.discover()
 	go a.watch()
+	go a.checkUpdates()
 	a.restart(false)
 	a.restartHear(false)
 }
@@ -785,6 +804,7 @@ func (a *app) refreshStatus() {
 		tip = string(r[:126]) + "…"
 	}
 	systray.SetTooltip(tip)
+	a.showMacUpdateLocked()
 	a.setIcon(icon)
 }
 
@@ -924,6 +944,7 @@ func (a *app) refreshMenu() {
 	}
 	check(a.mDefaultDev, cfg.Device == "")
 	check(a.mVolume, cfg.ForwardVolume)
+	a.showUpdateLocked()
 }
 
 func containsDevice(devs []wasapi.Device, name string) bool {

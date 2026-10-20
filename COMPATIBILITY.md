@@ -101,9 +101,9 @@ Tests: `cmd/outloud/config_test.go`, `internal/pairing/compat_test.go` and
 ## How it may change
 
 - **Optional fields** may be added to the Hello, stats, capture problems and
-  settings. Their absence must mean what an older release does. Older
-  releases ignore fields they do not know; when they save settings, they drop
-  them.
+  settings. A missing field must mean what an older release does, or, for a
+  setting, its default. Older releases ignore fields they do not know; when
+  they save settings, they drop them.
 - **Message types** may be added. Peers skip types they do not know. A side
   sends a new type only where skipping it is harmless, or once the other side
   has said it understands it, in its Hello or TXT record.
