@@ -89,6 +89,11 @@ after 10 s of silence the Mac lets go of its audio device so it can sleep. If
 the network hiccups and the sound drops out, the Mac buffers a little more
 for a while, then creeps back to the latency you chose.
 
+One PC at a time streams to a Mac, and one hears it. Choosing a Mac that
+another PC is using takes it over. The other PC then waits: its menu says
+who has the Mac, clicking that line takes the Mac back, and it carries on by
+itself once the Mac is free.
+
 ### Pairing
 
 A Mac only plays sound from PCs it is paired with, and only lets those hear
@@ -227,8 +232,8 @@ Logs: `%LOCALAPPDATA%\Outloud\Outloud.log` (tray menu ▸ **Open log**) and
 
 ## Limitations
 
-- One sender at a time: a second paired PC takes over from the first.
-  Likewise one PC at a time can hear the Mac.
+- One PC at a time streams to a Mac, and one hears it; see
+  [Using it](#using-it).
 - Anyone on the network can see that a receiver is there, and what it is
   called, and can ask to pair, which the Mac asks you about.
 - The Mac receiver's certificate is Outloud's own, not Apple's, so install

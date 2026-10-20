@@ -176,11 +176,15 @@ func (a *app) ready() {
 
 	title := systray.AddMenuItem(version.String(), "")
 	title.Disable()
+	// The status items are enabled while another PC uses the Mac; clicking
+	// one then takes the Mac over.
 	a.mStatus = systray.AddMenuItem("Starting…", "")
 	a.mStatus.Disable()
+	onClick(a.mStatus, a.takeOver)
 	a.mHearStatus = systray.AddMenuItem("", "")
 	a.mHearStatus.Disable()
 	a.mHearStatus.Hide()
+	onClick(a.mHearStatus, a.takeOverHearing)
 	systray.AddSeparator()
 
 	header := systray.AddMenuItem("Speakers", "")
@@ -252,8 +256,8 @@ func (a *app) ready() {
 	a.refreshMenu()
 	go a.discover()
 	go a.watch()
-	a.restart()
-	a.restartHear()
+	a.restart(false)
+	a.restartHear(false)
 }
 
 func (a *app) exit() {
@@ -274,8 +278,9 @@ func (a *app) exit() {
 }
 
 // restart stops the current sender, if any, and starts one for the current
-// config.
-func (a *app) restart() {
+// config. takeOver says the user has just chosen the speaker, so the sender
+// may take it from another PC; otherwise it waits until the speaker is free.
+func (a *app) restart(takeOver bool) {
 	a.restartMu.Lock()
 	defer a.restartMu.Unlock()
 	if a.running != nil {
@@ -302,6 +307,7 @@ func (a *app) restart() {
 		Peers:         a.peers,
 		Latency:       time.Duration(cfg.LatencyMs) * time.Millisecond,
 		ForwardVolume: cfg.ForwardVolume,
+		TakeOver:      takeOver,
 		OnStatus:      a.onStatus,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -316,8 +322,8 @@ func (a *app) restart() {
 }
 
 // restartHear stops playing a Mac's sound, if it is, and starts again for
-// the current config.
-func (a *app) restartHear() {
+// the current config. takeOver is as for restart.
+func (a *app) restartHear(takeOver bool) {
 	a.restartMu.Lock()
 	defer a.restartMu.Unlock()
 	if a.hearing != nil {
@@ -352,6 +358,7 @@ func (a *app) restartHear() {
 		Playout:  p,
 		Latency:  time.Duration(cfg.LatencyMs) * time.Millisecond,
 		Log:      a.log,
+		TakeOver: takeOver,
 		OnStatus: a.onHearStatus,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -414,7 +421,13 @@ func targetName(c Config) string {
 
 // update changes the config, saves it and restarts each direction whose
 // settings changed.
-func (a *app) update(f func(*Config)) {
+func (a *app) update(f func(*Config)) { a.apply(f, false) }
+
+// choose is update for when the user chooses a Mac: a direction that
+// restarts may take the Mac from another PC.
+func (a *app) choose(f func(*Config)) { a.apply(f, true) }
+
+func (a *app) apply(f func(*Config), takeOver bool) {
 	a.mu.Lock()
 	before := a.cfg
 	f(&a.cfg)
@@ -425,10 +438,10 @@ func (a *app) update(f func(*Config)) {
 	a.mu.Unlock()
 	a.refreshMenu()
 	if after.sendPart() != before.sendPart() {
-		a.restart()
+		a.restart(takeOver)
 	}
 	if after.hearPart() != before.hearPart() {
-		a.restartHear()
+		a.restartHear(takeOver)
 	}
 }
 
@@ -445,14 +458,15 @@ func (a *app) chooseSpeaker(i int) {
 		return
 	}
 	s := a.speakers[i]
-	// Choosing the current speaker again retries at once.
+	// Choosing the current speaker again retries at once, taking it from
+	// another PC that uses it.
 	again := s.name == a.cfg.Receiver && s.addr == a.cfg.Address && a.status.State != sender.Connected
 	a.mu.Unlock()
 	if again {
-		a.restart()
+		a.restart(true)
 		return
 	}
-	a.update(func(c *Config) { c.Receiver, c.Address = s.name, s.addr })
+	a.choose(func(c *Config) { c.Receiver, c.Address = s.name, s.addr })
 }
 
 func (a *app) chooseDevice(i int) {
@@ -464,6 +478,29 @@ func (a *app) chooseDevice(i int) {
 	name := a.devices[i].Name
 	a.mu.Unlock()
 	a.update(func(c *Config) { c.Device = name })
+}
+
+// takeOver takes the speaker from the PC that uses it, if one does.
+func (a *app) takeOver() {
+	a.mu.Lock()
+	by := sender.InUseBy(a.status.Err)
+	a.mu.Unlock()
+	if by != "" {
+		a.log.Printf("taking the speaker over from %s", by)
+		a.restart(true)
+	}
+}
+
+// takeOverHearing takes the Mac's sound from the PC that hears it, if one
+// does.
+func (a *app) takeOverHearing() {
+	a.mu.Lock()
+	by := sender.InUseBy(a.hearStatus.Err)
+	a.mu.Unlock()
+	if by != "" {
+		a.log.Printf("taking the Mac's sound over from %s", by)
+		a.restartHear(true)
+	}
 }
 
 func (a *app) stopStreaming() {
@@ -479,7 +516,7 @@ func (a *app) toggleHear(i int) {
 	}
 	s := a.hearable[i]
 	a.mu.Unlock()
-	a.update(func(c *Config) {
+	a.choose(func(c *Config) {
 		if strings.EqualFold(c.Hear, s.name) {
 			c.Hear, c.HearAddress = "", ""
 		} else {
@@ -497,7 +534,7 @@ func (a *app) connectByAddress() {
 	if !ok {
 		return
 	}
-	a.update(func(c *Config) { c.Receiver, c.Address = "", addr })
+	a.choose(func(c *Config) { c.Receiver, c.Address = "", addr })
 }
 
 func (a *app) toggleAutostart() {
@@ -576,6 +613,8 @@ func (a *app) onStatus(st sender.Status) {
 	switch {
 	case st.State != prev.State && st.State == sender.Connected:
 		a.log.Printf("connected to %q at %s (%s)", st.Receiver, st.Addr, st.Software)
+	case st.State != prev.State && sender.InUseBy(st.Err) != "":
+		a.log.Printf("%s uses the speaker; waiting until it is free", sender.InUseBy(st.Err))
 	case st.State != prev.State && st.State == sender.Disconnected && st.Err != nil:
 		a.log.Printf("not connected: %v", st.Err)
 	case st.Device != prev.Device && st.Device != "":
@@ -618,6 +657,8 @@ func (a *app) onHearStatus(st listener.Status) {
 	switch {
 	case st.State != prev.State && st.State == sender.Connected:
 		a.log.Printf("hearing %q at %s (%s)", st.Receiver, st.Addr, st.Software)
+	case st.State != prev.State && sender.InUseBy(st.Err) != "":
+		a.log.Printf("%s hears the Mac; waiting until it is free", sender.InUseBy(st.Err))
 	case st.State != prev.State && st.State == sender.Disconnected && st.Err != nil:
 		a.log.Printf("not hearing: %v", st.Err)
 	}
@@ -665,9 +706,12 @@ func (a *app) refreshStatus() {
 	}
 
 	text, icon := "", a.icons.off
+	inUse := cfg.streaming() && sender.InUseBy(st.Err) != ""
 	switch {
 	case !cfg.streaming():
 		text = "Not streaming: choose a speaker"
+	case inUse:
+		text = sender.InUseBy(st.Err) + " is using " + name + ": click to take it over"
 	case st.State == sender.Disconnected && problem(st.Err, name) != "":
 		text = problem(st.Err, name)
 	case st.State == sender.Connected && st.Err != nil:
@@ -691,6 +735,7 @@ func (a *app) refreshStatus() {
 		text = string(r[:79]) + "…"
 	}
 	a.mStatus.SetTitle(text)
+	enable(a.mStatus, inUse)
 	tip := "Outloud\n" + text
 	if st.State == sender.Connected && st.Stats.Output != "" {
 		tip += "\nPlays on " + st.Stats.Output
@@ -699,12 +744,16 @@ func (a *app) refreshStatus() {
 		tip += fmt.Sprintf("\n%.0f ms buffer", st.Stats.TargetMs)
 	}
 
+	hearInUse := false
 	if hs := a.hearStatus; cfg.hearing() {
 		name := cfg.Hear
 		if hs.Receiver != "" {
 			name = hs.Receiver
 		}
+		hearInUse = sender.InUseBy(hs.Err) != ""
 		switch {
+		case hearInUse:
+			text = sender.InUseBy(hs.Err) + " is hearing " + name + ": click to hear it here instead"
 		case hs.State == sender.Connected && hs.Capture.Problem == proto.CaptureNeedsPermission:
 			text = name + ": click Allow on the Mac to let it share its sound"
 		case hs.State == sender.Connected && hs.Capture.Problem == proto.CaptureDenied:
@@ -729,6 +778,7 @@ func (a *app) refreshStatus() {
 	} else {
 		a.mHearStatus.Hide()
 	}
+	enable(a.mHearStatus, hearInUse)
 	if r := []rune(tip); len(r) > 127 {
 		tip = string(r[:126]) + "…"
 	}
@@ -887,6 +937,17 @@ func check(mi *systray.MenuItem, on bool) {
 	}
 }
 
+// enable enables or disables mi, touching the menu only if that changes it,
+// since the status refreshes every second.
+func enable(mi *systray.MenuItem, on bool) {
+	switch {
+	case on && mi.Disabled():
+		mi.Enable()
+	case !on && !mi.Disabled():
+		mi.Disable()
+	}
+}
+
 // discover keeps the speaker list current.
 func (a *app) discover() {
 	for {
@@ -923,7 +984,7 @@ func (a *app) discover() {
 		if auto {
 			a.log.Printf("first run: streaming to the only speaker found, %q", svcs[0].Instance)
 			a.refreshMenu()
-			a.restart()
+			a.restart(false)
 		}
 		time.Sleep(browseEvery)
 	}

@@ -40,10 +40,11 @@ const (
 )
 
 // Server plays the audio of one sender at a time. A new sender takes over
-// from the current one, so a sender reconnecting after a network drop never
-// waits for its stale connection to time out. Independently, it streams
-// Capture to one sender that listens, again with takeover. Only paired
-// senders get either.
+// from the current one, unless it asks to play only if the receiver is free
+// and another device is playing; a device always takes over from itself, so
+// a sender reconnecting after a network drop never waits for its stale
+// connection to time out. Independently, it streams Capture to one sender
+// that listens, in the same way. Only paired senders get either.
 type Server struct {
 	Name    string
 	Playout *playout.Playout
@@ -64,11 +65,10 @@ type Server struct {
 	Output func() Output
 	Log    *log.Logger
 
-	// current, listener and the connections in handle are the TCP
-	// connections under TLS, which close at once.
+	// current is the sender playing here and listener the one listening.
 	mu       sync.Mutex
-	current  net.Conn
-	listener net.Conn
+	current  peerConn
+	listener peerConn
 	// captureMu is held while Capture runs, so a listener taking over
 	// waits for the previous capture to stop.
 	captureMu sync.Mutex
@@ -79,6 +79,14 @@ type Server struct {
 	pairMu     sync.Mutex
 	declinedAt time.Time
 	logged     map[string]time.Time
+}
+
+// peerConn is the connection of a sender playing or listening, and who that
+// sender is. Here and in handle, connections are the TCP connections under
+// TLS, which close at once.
+type peerConn struct {
+	conn     net.Conn
+	id, name string
 }
 
 // Output describes where a receiver plays.
@@ -106,7 +114,26 @@ func (s *Server) Serve(l net.Listener) error {
 func (s *Server) isCurrent(c net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.current == c
+	return s.current.conn == c
+}
+
+// take makes raw, from the sender with key id called name, the connection
+// in pc, closing the one it replaces. With ifFree it leaves pc alone if
+// another sender has it, and returns that sender's name.
+func (s *Server) take(pc *peerConn, raw net.Conn, id, name string, ifFree bool) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pc.conn != nil {
+		if pc.id != id {
+			if ifFree {
+				return pc.name
+			}
+			s.Log.Printf("%s takes over from %s", name, pc.name)
+		}
+		pc.conn.Close()
+	}
+	*pc = peerConn{conn: raw, id: id, name: name}
+	return ""
 }
 
 func (s *Server) handle(raw net.Conn) {
@@ -169,6 +196,28 @@ func (s *Server) handle(raw net.Conn) {
 		refuse(proto.RefusedNoCapture)
 		return
 	}
+	pc, role := &s.current, "playing here"
+	if hello.Listen {
+		pc, role = &s.listener, "listening"
+	}
+	if user := s.take(pc, raw, peerID, name, hello.IfFree); user != "" {
+		// It asks again every few seconds while it waits.
+		s.logOnce("in use "+role+peerID, "%s waits: %s is %s", name, user, role)
+		in := s.hello(proto.RefusedInUse)
+		in.User = user
+		_ = proto.WriteJSON(conn, proto.MsgHello, in)
+		return
+	}
+	defer func() {
+		s.mu.Lock()
+		if pc.conn == raw {
+			*pc = peerConn{}
+			if !hello.Listen {
+				s.Playout.Idle()
+			}
+		}
+		s.mu.Unlock()
+	}()
 	if err := proto.WriteJSON(conn, proto.MsgHello, s.hello("")); err != nil {
 		return
 	}
@@ -187,29 +236,18 @@ func (s *Server) handle(raw net.Conn) {
 		return
 	}
 
-	s.mu.Lock()
-	if s.current != nil {
-		s.current.Close()
-	}
-	s.current = raw
-	s.Playout.Reset()
 	target := s.Latency
 	if hello.LatencyMs > 0 {
 		target = time.Duration(hello.LatencyMs) * time.Millisecond
 	}
-	s.Playout.SetTarget(target)
+	s.mu.Lock()
+	if s.current.conn == raw {
+		s.Playout.Reset()
+		s.Playout.SetTarget(target)
+	}
 	s.mu.Unlock()
 
 	s.Log.Printf("%s%s connected from %s, buffering %v", name, software, remote, target)
-	defer func() {
-		s.mu.Lock()
-		if s.current == raw {
-			s.current = nil
-			s.Playout.Idle()
-		}
-		s.mu.Unlock()
-	}()
-
 	var problem proto.Capture
 	err = Play(conn, rd, Player{
 		Playout: s.Playout,
@@ -333,15 +371,9 @@ func (s *Server) logOnce(key, format string, args ...any) {
 	s.Log.Printf(format, args...)
 }
 
-// sendCapture streams Capture over conn to a sender that listens, taking
-// over from the previous one. raw is the connection under conn.
+// sendCapture streams Capture over conn to a sender that listens, which has
+// taken over from the previous one. raw is the connection under conn.
 func (s *Server) sendCapture(raw, conn net.Conn, rd *proto.Reader, name string) {
-	s.mu.Lock()
-	if s.listener != nil {
-		s.listener.Close()
-	}
-	s.listener = raw
-	s.mu.Unlock()
 	if !s.captureMu.TryLock() {
 		// The previous listener's capture is still stopping, which can take
 		// until someone answers macOS's permission prompt. Meanwhile keep
@@ -356,18 +388,11 @@ func (s *Server) sendCapture(raw, conn net.Conn, rd *proto.Reader, name string) 
 	isListener := func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.listener == raw
+		return s.listener.conn == raw
 	}
 	if !isListener() {
 		return
 	}
-	defer func() {
-		s.mu.Lock()
-		if s.listener == raw {
-			s.listener = nil
-		}
-		s.mu.Unlock()
-	}()
 
 	var device, lastErr string
 	err := sender.Stream(context.Background(), conn, rd, s.Capture, func(st sender.Status) {

@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,12 @@ import (
 	"github.com/thomasreichmann/outloud/internal/sender"
 	"github.com/thomasreichmann/outloud/internal/source"
 )
+
+func TestMain(m *testing.M) {
+	// Set before any listener runs, which reads it.
+	sender.InUseRetry = 100 * time.Millisecond
+	os.Exit(m.Run())
+}
 
 // paired makes keys for a PC and a receiver that are paired with each
 // other, and the receiver's list of paired devices.
@@ -184,6 +191,59 @@ func TestCaptureProblem(t *testing.T) {
 	close(release)
 	waitFor(t, "the problem to clear", func() bool { return second.Status().Capture == proto.Capture{} })
 	waitFor(t, "the receiver's sound", func() bool { return peak(local) > 0.2 })
+}
+
+// TestListenTakeOver checks that, as with streaming, a PC that listens on
+// its own waits while another PC listens, and one whose user chose to
+// listen takes over, leaving the other to wait.
+func TestListenTakeOver(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	pc, mac, pcPeers, macPeers := paired(t)
+	other, err := pairing.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	macPeers.Add(pairing.Peer{ID: other.ID, Name: "other"})
+	otherPeers := pairing.MemoryStore(pairing.Peer{ID: mac.ID})
+	srv := &receiver.Server{
+		Name: "test receiver", Playout: playout.New(playout.Config{OutputRate: 48000}),
+		Capture: source.Tone{Freq: 660, Gain: 0.25}, Identity: mac, Peers: macPeers, Log: log.New(io.Discard, "", 0),
+	}
+	go srv.Serve(l)
+	listen := func(name string, id *pairing.Identity, peers *pairing.Store, takeOver bool) (*listener.Listener, context.CancelFunc) {
+		ln := &listener.Listener{
+			Target: sender.Target{Addr: l.Addr().String()}, Name: name, Identity: id, Peers: peers,
+			Playout: playout.New(playout.Config{OutputRate: 48000}), Latency: 40 * time.Millisecond,
+			Log: log.New(io.Discard, "", 0), TakeOver: takeOver,
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go ln.Run(ctx)
+		return ln, cancel
+	}
+	listening := func(ln *listener.Listener) func() bool {
+		return func() bool { return ln.Status().State == sender.Connected }
+	}
+	waiting := func(ln *listener.Listener, by string) func() bool {
+		return func() bool {
+			st := ln.Status()
+			return st.State == sender.Disconnected && sender.InUseBy(st.Err) == by
+		}
+	}
+
+	first, stop1 := listen("first", pc, pcPeers, true)
+	defer stop1()
+	waitFor(t, "the first to listen", listening(first))
+	second, stop2 := listen("second", other, otherPeers, false)
+	waitFor(t, "the second to wait", waiting(second, "first"))
+	stop2()
+	third, stop3 := listen("third", other, otherPeers, true)
+	defer stop3()
+	waitFor(t, "the third to listen", listening(third))
+	waitFor(t, "the first to wait", waiting(first, "third"))
 }
 
 // TestNoCapture checks that a receiver without a capture source turns a

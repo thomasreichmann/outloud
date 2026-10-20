@@ -19,8 +19,6 @@ import (
 	"github.com/thomasreichmann/outloud/internal/sender"
 )
 
-const maxBackoff = 10 * time.Second
-
 // Status describes the listener for display.
 type Status struct {
 	State    sender.State
@@ -45,11 +43,16 @@ type Listener struct {
 	// Latency is the amount of audio to buffer.
 	Latency time.Duration
 	Log     *log.Logger
+	// TakeOver lets Run take the receiver's sound from another device
+	// listening to it, as sender.Sender.TakeOver does for streaming.
+	TakeOver bool
 	// OnStatus, if set, is called whenever the status changes.
 	OnStatus func(Status)
 
 	mu     sync.Mutex
 	status Status
+	// takeOver is TakeOver until a connection succeeds.
+	takeOver bool
 }
 
 // Status returns the current status.
@@ -72,10 +75,16 @@ func (l *Listener) update(st Status) {
 // only if the receiver and this device are not paired.
 func (l *Listener) Run(ctx context.Context) error {
 	backoff := time.Second
+	l.takeOver = l.TakeOver
+	var err error
 	for {
-		l.update(Status{State: sender.Connecting})
+		// While the receiver is in use, the status goes on saying by whom.
+		if sender.InUseBy(err) == "" {
+			l.update(Status{State: sender.Connecting})
+		}
 		started := time.Now()
-		addr, err := sender.Resolve(ctx, l.Target)
+		var addr string
+		addr, err = sender.Resolve(ctx, l.Target)
 		if err == nil {
 			err = l.session(ctx, addr)
 		}
@@ -93,18 +102,18 @@ func (l *Listener) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(backoff):
+		case <-time.After(sender.RetryAfter(err, &backoff)):
 		}
-		backoff = min(2*backoff, maxBackoff)
 	}
 }
 
 func (l *Listener) session(ctx context.Context, addr string) error {
-	c, err := sender.Dial(ctx, addr, proto.Hello{Name: l.Name, Listen: true}, l.Identity, l.Peers)
+	c, err := sender.Dial(ctx, addr, proto.Hello{Name: l.Name, Listen: true, IfFree: !l.takeOver}, l.Identity, l.Peers)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
+	l.takeOver = false
 	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()
 

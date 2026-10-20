@@ -124,6 +124,11 @@ type Sender struct {
 	Latency time.Duration
 	// ForwardVolume applies the Windows volume on the receiver.
 	ForwardVolume bool
+	// TakeOver lets Run take the receiver from another device streaming to
+	// it, as when the user has just chosen it. Once connected, and always
+	// without TakeOver, Run waits until the receiver is free instead; the
+	// status then says who uses it.
+	TakeOver bool
 	// OnStatus, if set, is called whenever the status changes, never
 	// concurrently.
 	OnStatus func(Status)
@@ -133,6 +138,8 @@ type Sender struct {
 	notify sync.Mutex
 	mu     sync.Mutex
 	status Status
+	// takeOver is TakeOver until a connection succeeds.
+	takeOver bool
 }
 
 // Status returns the current status.
@@ -159,10 +166,16 @@ func (s *Sender) update(f func(*Status)) {
 // pairing.ErrNotPaired; the status has that error too.
 func (s *Sender) Run(ctx context.Context) error {
 	backoff := time.Second
+	s.takeOver = s.TakeOver
+	var err error
 	for {
-		s.update(func(st *Status) { *st = Status{State: Connecting} })
+		// While the receiver is in use, the status goes on saying by whom.
+		if InUseBy(err) == "" {
+			s.update(func(st *Status) { *st = Status{State: Connecting} })
+		}
 		started := time.Now()
-		addr, err := Resolve(ctx, s.Target)
+		var addr string
+		addr, err = Resolve(ctx, s.Target)
 		if err == nil {
 			err = s.session(ctx, addr)
 		}
@@ -180,9 +193,8 @@ func (s *Sender) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(backoff):
+		case <-time.After(RetryAfter(err, &backoff)):
 		}
-		backoff = min(2*backoff, maxBackoff)
 	}
 }
 
@@ -195,6 +207,36 @@ var (
 	// ErrBusy means the receiver is pairing with someone else.
 	ErrBusy = errors.New("the receiver is busy pairing; try again in a moment")
 )
+
+// InUseRetry is how often a sender waiting for a receiver that is in use
+// asks it again.
+var InUseRetry = 5 * time.Second
+
+// InUseError means that another device, called By, is using the receiver.
+type InUseError struct{ By string }
+
+func (e *InUseError) Error() string { return "the receiver is in use by " + e.By }
+
+// InUseBy returns who uses the receiver if err says it is in use, or "".
+func InUseBy(err error) string {
+	var e *InUseError
+	if errors.As(err, &e) {
+		return e.By
+	}
+	return ""
+}
+
+// RetryAfter is how long to wait before connecting again after err, given
+// the backoff so far, which it updates. A receiver in use is asked again
+// every InUseRetry, without backing off.
+func RetryAfter(err error, backoff *time.Duration) time.Duration {
+	if InUseBy(err) != "" {
+		return InUseRetry
+	}
+	d := *backoff
+	*backoff = min(2**backoff, maxBackoff)
+	return d
+}
 
 // Conn is a connection to a receiver whose handshake is done.
 type Conn struct {
@@ -266,6 +308,11 @@ func Dial(ctx context.Context, addr string, hello proto.Hello, id *pairing.Ident
 		return fail(ErrNoCapture)
 	case proto.RefusedBusy:
 		return fail(ErrBusy)
+	case proto.RefusedInUse:
+		if peer.User == "" {
+			peer.User = "another device"
+		}
+		return fail(&InUseError{By: peer.User})
 	default:
 		return fail(fmt.Errorf("the receiver refused: %s", peer.Refused))
 	}
@@ -302,11 +349,13 @@ func Pair(ctx context.Context, addr, name string, id *pairing.Identity, peers *p
 
 // session runs one connection until it fails or ctx is done.
 func (s *Sender) session(ctx context.Context, addr string) error {
-	c, err := Dial(ctx, addr, proto.Hello{Name: s.Name, LatencyMs: int(s.Latency / time.Millisecond)}, s.Identity, s.Peers)
+	hello := proto.Hello{Name: s.Name, LatencyMs: int(s.Latency / time.Millisecond), IfFree: !s.takeOver}
+	c, err := Dial(ctx, addr, hello, s.Identity, s.Peers)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
+	s.takeOver = false
 	s.update(func(st *Status) {
 		*st = Status{State: Connected, Receiver: c.Peer.Name, Software: c.Peer.Software, PeerID: c.PeerID, Addr: addr}
 	})

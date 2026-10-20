@@ -167,6 +167,8 @@ func stream(ctx context.Context, k keys, src source.Source, target sender.Target
 		Peers:         k.peers,
 		Latency:       latency,
 		ForwardVolume: volume,
+		// Running the command is choosing the receiver.
+		TakeOver: true,
 		OnStatus: func(st sender.Status) {
 			switch {
 			case st.State != last.State || st.Receiver != last.Receiver:
@@ -184,9 +186,7 @@ func stream(ctx context.Context, k keys, src source.Source, target sender.Target
 					}
 					logf("connected to %q at %s (%s)", st.Receiver, st.Addr, sw)
 				case sender.Disconnected:
-					if st.Err != nil && !errors.Is(st.Err, pairing.ErrNotPaired) {
-						logf("not connected: %v (retrying)", st.Err)
-					}
+					logDisconnect(st.Err)
 				}
 			case st.Device != last.Device || st.Rate != last.Rate:
 				logf("capturing %q at %d Hz", st.Device, st.Rate)
@@ -258,6 +258,7 @@ func listen(ctx context.Context, k keys, target sender.Target, latency time.Dura
 		Playout:  p,
 		Latency:  latency,
 		Log:      log.New(os.Stdout, "", log.Ltime),
+		TakeOver: true,
 		OnStatus: func(st listener.Status) {
 			if st.Capture != last.Capture && st.State == sender.Connected {
 				if st.Capture.Error != "" {
@@ -276,14 +277,23 @@ func listen(ctx context.Context, k keys, target sender.Target, latency time.Dura
 			case sender.Connected:
 				logf("listening to %q at %s (%s)", st.Receiver, st.Addr, st.Software)
 			case sender.Disconnected:
-				if st.Err != nil && !errors.Is(st.Err, pairing.ErrNotPaired) {
-					logf("not connected: %v (retrying)", st.Err)
-				}
+				logDisconnect(st.Err)
 			}
 			last = st
 		},
 	}
 	return l.Run(ctx)
+}
+
+// logDisconnect says why a connection to a receiver failed or ended.
+func logDisconnect(err error) {
+	switch {
+	case err == nil || errors.Is(err, pairing.ErrNotPaired):
+	case sender.InUseBy(err) != "":
+		logf("%s uses the receiver now; waiting until it is free (run this again to take it back)", sender.InUseBy(err))
+	default:
+		logf("not connected: %v (retrying)", err)
+	}
 }
 
 func list(ctx context.Context, service string) error {

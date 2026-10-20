@@ -61,10 +61,11 @@ func (a *app) pairFor(dir direction, name, addr string) {
 	switch {
 	case !still:
 		// The settings moved on while pairing.
+	// Pairing was the user's choice of this Mac.
 	case err == nil && dir == toMac:
-		a.restart()
+		a.restart(true)
 	case err == nil:
-		a.restartHear()
+		a.restartHear(true)
 	case dir == toMac:
 		a.update(func(c *Config) { c.Receiver, c.Address = "", "" })
 	default:

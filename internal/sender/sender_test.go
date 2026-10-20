@@ -10,6 +10,8 @@ import (
 	"log"
 	"math"
 	"net"
+	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +22,12 @@ import (
 	"github.com/thomasreichmann/outloud/internal/sender"
 	"github.com/thomasreichmann/outloud/internal/source"
 )
+
+func TestMain(m *testing.M) {
+	// Set before any sender runs, which reads it.
+	sender.InUseRetry = 100 * time.Millisecond
+	os.Exit(m.Run())
+}
 
 // devices is a PC and a receiver, each with its key and paired devices.
 type devices struct {
@@ -120,21 +128,90 @@ func TestStreamsToReceiver(t *testing.T) {
 	}
 }
 
-func TestNewSenderTakesOver(t *testing.T) {
-	_, d := startReceiver(t, true)
-	run := func(name string) (*sender.Sender, context.CancelFunc) {
-		s := d.sender(name)
-		ctx, cancel := context.WithCancel(context.Background())
-		go s.Run(ctx)
-		return s, cancel
+// anotherPC pairs one more PC with the receiver, and returns a sender for it.
+func (d *devices) anotherPC(t *testing.T, name string) *sender.Sender {
+	t.Helper()
+	id := identity(t)
+	d.macPeers.Add(pairing.Peer{ID: id.ID, Name: name})
+	s := d.sender(name)
+	s.Identity, s.Peers = id, pairing.MemoryStore(pairing.Peer{ID: d.mac.ID, Name: "test receiver"})
+	return s
+}
+
+func run(s *sender.Sender) context.CancelFunc {
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.Run(ctx)
+	return cancel
+}
+
+func connected(s *sender.Sender) func() bool {
+	return func() bool { return s.Status().State == sender.Connected }
+}
+
+func waiting(s *sender.Sender, by string) func() bool {
+	return func() bool {
+		st := s.Status()
+		return st.State == sender.Disconnected && sender.InUseBy(st.Err) == by
 	}
-	first, stop1 := run("first")
-	defer stop1()
-	waitFor(t, "first connection", func() bool { return first.Status().State == sender.Connected })
-	second, stop2 := run("second")
-	defer stop2()
-	waitFor(t, "second connection", func() bool { return second.Status().State == sender.Connected })
-	waitFor(t, "first to be dropped", func() bool { return first.Status().State != sender.Connected })
+}
+
+// TestTakeOver checks that a PC whose user chooses a receiver takes it from
+// the PC using it, which then waits, knowing who has the receiver, rather
+// than take it back; and that the waiting PC continues once it is free.
+func TestTakeOver(t *testing.T) {
+	_, d := startReceiver(t, true)
+	// Its user chose the receiver too, but that was before it connected.
+	first := d.sender("first")
+	first.TakeOver = true
+	defer run(first)()
+	waitFor(t, "first connection", connected(first))
+
+	// A PC that starts on its own waits.
+	second := d.anotherPC(t, "second")
+	stop2 := run(second)
+	waitFor(t, "second to wait", waiting(second, "first"))
+	stop2()
+
+	third := d.anotherPC(t, "third")
+	third.TakeOver = true
+	var mu sync.Mutex
+	drops, up := 0, false
+	third.OnStatus = func(st sender.Status) {
+		mu.Lock()
+		defer mu.Unlock()
+		if up && st.State != sender.Connected {
+			drops++
+		}
+		up = st.State == sender.Connected
+	}
+	stop3 := run(third)
+	waitFor(t, "third connection", connected(third))
+	waitFor(t, "first to wait", waiting(first, "third"))
+	time.Sleep(10 * sender.InUseRetry)
+	mu.Lock()
+	n := drops
+	mu.Unlock()
+	if n != 0 || !waiting(first, "third")() {
+		t.Fatalf("the third was dropped %d times; first: %+v", n, first.Status())
+	}
+
+	stop3()
+	waitFor(t, "first to continue", connected(first))
+}
+
+// TestReconnectReplacesStale checks that a PC reconnecting on its own gets
+// in although the receiver still holds its old connection, as after a
+// network drop.
+func TestReconnectReplacesStale(t *testing.T) {
+	_, d := startReceiver(t, true)
+	stale, err := sender.Dial(context.Background(), d.addr, proto.Hello{Name: "pc"}, d.pc, d.pcPeers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stale.Close()
+	s := d.sender("pc")
+	defer run(s)()
+	waitFor(t, "the reconnection", connected(s))
 }
 
 // runUntilDone runs s and returns what Run returned.

@@ -125,9 +125,17 @@ type Hello struct {
 	// Pair asks the receiver to pair with the sender, which it does whether
 	// or not they are paired already. Only meaningful from the sender.
 	Pair bool `json:"pair,omitempty"`
+	// IfFree asks the receiver not to take playing, or listening, away from
+	// another device that is doing it, but to refuse with RefusedInUse.
+	// Senders set it when they connect on their own rather than because
+	// their user just chose the receiver. Only meaningful from the sender.
+	IfFree bool `json:"if_free,omitempty"`
 	// Refused, from the receiver, says why it turned the sender away: one
 	// of the Refused constants. The receiver closes the connection after.
 	Refused string `json:"refused,omitempty"`
+	// User, with RefusedInUse, is the name of the device using the
+	// receiver.
+	User string `json:"user,omitempty"`
 }
 
 // Reasons a receiver turns a sender away.
@@ -140,6 +148,9 @@ const (
 	// RefusedBusy: the sender wants to pair while the receiver is pairing
 	// with someone else, or has just been told no.
 	RefusedBusy = "busy"
+	// RefusedInUse: the sender asked IfFree, and another device, named in
+	// User, is playing through the receiver or listening to it.
+	RefusedInUse = "in use"
 )
 
 // CaptureTXT is in the TXT record of receivers that can stream their own
