@@ -80,6 +80,7 @@ type app struct {
 	lastPair pairResult
 
 	mu          sync.Mutex
+	quitting    bool           // the tray icon is gone
 	pairingWith string         // the Mac being paired with, for the status
 	paired      []pairing.Peer // what the paired items currently show
 	cfg         Config
@@ -280,6 +281,11 @@ func (a *app) ready() {
 }
 
 func (a *app) exit() {
+	// The icon is gone by now, and stopping each direction below reports a
+	// last status: refreshing the menu or icon from here on only fails.
+	a.mu.Lock()
+	a.quitting = true
+	a.mu.Unlock()
 	a.restartMu.Lock()
 	for _, r := range []*run{a.running, a.hearing} {
 		if r != nil {
@@ -702,6 +708,9 @@ func (a *app) setIcon(b []byte) {
 func (a *app) refreshStatus() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.quitting {
+		return
+	}
 	st, cfg := a.status, a.cfg
 	name := cfg.Receiver
 	if st.Receiver != "" {
@@ -813,6 +822,9 @@ func (a *app) refreshStatus() {
 func (a *app) refreshMenu() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.quitting {
+		return
+	}
 	cfg := a.cfg
 
 	// A receiver that speaks another protocol version works only once one

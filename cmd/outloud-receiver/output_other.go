@@ -62,4 +62,6 @@ func localHostName() string { return hostName() }
 
 func install([]string) error { return errors.New("install is only implemented on macOS") }
 
+func trimLog() {}
+
 func uninstall() error { return errors.New("uninstall is only implemented on macOS") }

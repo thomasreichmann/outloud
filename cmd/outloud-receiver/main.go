@@ -92,6 +92,7 @@ Flags:
 		fmt.Println(version.String())
 		return
 	}
+	trimLog()
 	if *name == "" {
 		*name = computerName()
 	}
