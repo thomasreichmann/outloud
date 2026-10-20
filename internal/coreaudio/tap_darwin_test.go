@@ -2,10 +2,13 @@ package coreaudio
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -155,6 +158,60 @@ func TestLoad(t *testing.T) {
 	}
 	t.Logf("macOS %s on %s: %d processes use Core Audio, another plays: %v, permission %s",
 		v, runtime.GOARCH, len(w.procs), playing, Permission())
+}
+
+// tone is a quiet sine, as a Player's source, counting the frames read.
+type tone struct {
+	frames atomic.Int64
+	phase  float64
+}
+
+func (s *tone) Read(b []byte) (int, error) {
+	n := len(b) / 8
+	for i := range n {
+		v := math.Float32bits(float32(0.05 * math.Sin(s.phase)))
+		s.phase += 2 * math.Pi * 440 / 48000
+		binary.LittleEndian.PutUint32(b[8*i:], v)
+		binary.LittleEndian.PutUint32(b[8*i+4:], v)
+	}
+	s.frames.Add(int64(n))
+	return 8 * n, nil
+}
+
+// TestPlayer plays a quiet tone for three seconds, through the device's own
+// buffer, and checks that the device was fed all along without missing a
+// cycle; then that it stops and starts again.
+func TestPlayer(t *testing.T) {
+	needTap(t)
+	src := &tone{}
+	p, err := NewPlayer(src, 48000, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Sleep()
+	lat, err := p.Latency()
+	t.Logf("latency %v (%v)", lat, err)
+	time.Sleep(3 * time.Second)
+	frames := src.frames.Load()
+	t.Logf("%d frames in 3 s, %d overloads", frames, p.Overloads())
+	if frames < 3*48000*9/10 || frames > 3*48000*11/10 {
+		t.Errorf("read %d frames in 3 s, want about %d", frames, 3*48000)
+	}
+	if p.Overloads() != 0 {
+		t.Errorf("%d overloads", p.Overloads())
+	}
+	p.Sleep()
+	time.Sleep(200 * time.Millisecond)
+	before := src.frames.Load()
+	time.Sleep(300 * time.Millisecond)
+	if after := src.frames.Load(); after != before {
+		t.Errorf("read %d frames while asleep", after-before)
+	}
+	p.Wake()
+	time.Sleep(300 * time.Millisecond)
+	if src.frames.Load() == before {
+		t.Error("nothing read after waking")
+	}
 }
 
 // TestOutput reads the default output's name and mute state. It plays

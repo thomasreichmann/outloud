@@ -89,6 +89,7 @@ var (
 func (l *Loopback) Run(ctx context.Context, emit func(source.Event)) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	defer audioThread()()
 	if err := initCOM(); err != nil {
 		return err
 	}

@@ -20,6 +20,8 @@ func (noCapture) Run(context.Context, func(source.Event)) error {
 
 func newCapture(string, bool, bool) source.Source { return noCapture{} }
 
+func noThrottling() {}
+
 func devices() error { return errors.New("only implemented on Windows") }
 
 // openOutput consumes p in real time without a sound card, for testing.

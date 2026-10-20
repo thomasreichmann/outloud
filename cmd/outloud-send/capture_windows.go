@@ -10,6 +10,14 @@ import (
 	"github.com/thomasreichmann/outloud/internal/wasapi"
 )
 
+// noThrottling keeps Windows from slowing this program down, which would
+// hold up the sound.
+func noThrottling() {
+	if err := wasapi.NoThrottling(); err != nil {
+		logf("%v", err)
+	}
+}
+
 func newCapture(device string, native, excludeSelf bool) source.Source {
 	return &wasapi.Loopback{Device: device, NativeFormat: native, ExcludeSelf: func() bool { return excludeSelf }}
 }

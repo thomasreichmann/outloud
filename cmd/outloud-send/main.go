@@ -76,6 +76,7 @@ func main() {
 		pcName, _ = os.Hostname()
 	}
 
+	noThrottling()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 

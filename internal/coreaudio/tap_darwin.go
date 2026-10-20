@@ -89,6 +89,8 @@ type audioBuffer struct {
 }
 
 var (
+	baseOnce sync.Once
+	baseErr  error
 	loadOnce sync.Once
 	loadErr  error
 
@@ -117,22 +119,57 @@ var (
 	sel = map[string]objc.SEL{}
 )
 
+// loadBase loads what every macOS this runs on has: reading and watching
+// Core Audio's objects, and Foundation.
+func loadBase() error {
+	baseOnce.Do(func() {
+		ca, err := purego.Dlopen("/System/Library/Frameworks/CoreAudio.framework/CoreAudio", purego.RTLD_NOW|purego.RTLD_GLOBAL)
+		if err != nil {
+			baseErr = err
+			return
+		}
+		if _, err := purego.Dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", purego.RTLD_NOW|purego.RTLD_GLOBAL); err != nil {
+			baseErr = err
+			return
+		}
+		for name, fn := range map[string]any{
+			"AudioObjectGetPropertyData":        &audioObjectGetPropertyData,
+			"AudioObjectGetPropertyDataSize":    &audioObjectGetPropertyDataSize,
+			"AudioObjectAddPropertyListener":    &audioObjectAddPropertyListener,
+			"AudioObjectRemovePropertyListener": &audioObjectRemovePropertyListener,
+		} {
+			sym, err := purego.Dlsym(ca, name)
+			if err != nil {
+				baseErr = fmt.Errorf("Core Audio has no %s", name)
+				return
+			}
+			purego.RegisterFunc(fn, sym)
+		}
+		for _, name := range []string{
+			"alloc", "init", "new", "release", "drain", "UUID", "UUIDString", "UTF8String",
+			"stringWithUTF8String:", "numberWithUnsignedInt:", "numberWithBool:",
+			"arrayWithObject:", "array", "dictionary", "setObject:forKey:",
+			"initStereoGlobalTapButExcludeProcesses:", "setName:", "setPrivate:",
+		} {
+			sel[name] = objc.RegisterName(name)
+		}
+		listenerPtr = purego.NewCallback(listener)
+	})
+	return baseErr
+}
+
+// load loads, on top of loadBase, what capturing this Mac's sound takes.
 func load() error {
 	loadOnce.Do(func() {
+		if loadErr = loadBase(); loadErr != nil {
+			return
+		}
 		ca, err := purego.Dlopen("/System/Library/Frameworks/CoreAudio.framework/CoreAudio", purego.RTLD_NOW|purego.RTLD_GLOBAL)
 		if err != nil {
 			loadErr = err
 			return
 		}
-		if _, err := purego.Dlopen("/System/Library/Frameworks/Foundation.framework/Foundation", purego.RTLD_NOW|purego.RTLD_GLOBAL); err != nil {
-			loadErr = err
-			return
-		}
 		for name, fn := range map[string]any{
-			"AudioObjectGetPropertyData":          &audioObjectGetPropertyData,
-			"AudioObjectGetPropertyDataSize":      &audioObjectGetPropertyDataSize,
-			"AudioObjectAddPropertyListener":      &audioObjectAddPropertyListener,
-			"AudioObjectRemovePropertyListener":   &audioObjectRemovePropertyListener,
 			"AudioHardwareCreateProcessTap":       &audioHardwareCreateProcessTap,
 			"AudioHardwareDestroyProcessTap":      &audioHardwareDestroyProcessTap,
 			"AudioHardwareCreateAggregateDevice":  &audioHardwareCreateAggregateDevice,
@@ -158,16 +195,7 @@ func load() error {
 				purego.RegisterFunc(&tccAccessPreflight, sym)
 			}
 		}
-		for _, name := range []string{
-			"alloc", "init", "new", "release", "drain", "UUID", "UUIDString", "UTF8String",
-			"stringWithUTF8String:", "numberWithUnsignedInt:", "numberWithBool:",
-			"arrayWithObject:", "array", "dictionary", "setObject:forKey:",
-			"initStereoGlobalTapButExcludeProcesses:", "setName:", "setPrivate:",
-		} {
-			sel[name] = objc.RegisterName(name)
-		}
 		ioProcPtr = purego.NewCallback(ioProc)
-		listenerPtr = purego.NewCallback(listener)
 	})
 	return loadErr
 }

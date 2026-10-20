@@ -74,6 +74,13 @@ const (
 	maxGrowth   = 250 * time.Millisecond
 	shrinkEvery = time.Minute
 	shrinkStep  = 10 * time.Millisecond
+
+	// An underrun stops the sound mid-waveform, and resuming starts it
+	// mid-waveform; a jump to or from silence clicks. So the last frame
+	// fades out with time constant fadeOut, and playback fades back in over
+	// fadeIn.
+	fadeOut = time.Millisecond
+	fadeIn  = 5 * time.Millisecond
 )
 
 type Config struct {
@@ -136,6 +143,14 @@ type Playout struct {
 
 	gain, gainTarget, gainCoef float32
 
+	// Fading around an underrun. last is the frame played last, which
+	// fades out while tail is set. resume makes the next start fade in, over
+	// rampLen frames counted by ramp.
+	last          [2]float32
+	tail, resume  bool
+	ramp, rampLen int
+	tailCoef      float32
+
 	underruns, skips int
 }
 
@@ -149,7 +164,10 @@ func New(cfg Config) *Playout {
 		gain:       1,
 		gainTarget: 1,
 		gainCoef:   float32(1 - math.Exp(-1/(gainSmoothing*float64(cfg.OutputRate)))),
+		rampLen:    int(fadeIn.Seconds() * float64(cfg.OutputRate)),
+		tailCoef:   float32(math.Exp(-1 / (fadeOut.Seconds() * float64(cfg.OutputRate)))),
 	}
+	p.ramp = p.rampLen
 	return p
 }
 
@@ -170,6 +188,7 @@ func (p *Playout) SetFormat(rate, channels int) {
 	p.integ, p.adj = 0, 0
 	p.applyTarget()
 	p.state = Idle
+	p.resume = false
 }
 
 // SetTarget changes the amount of audio kept buffered.
@@ -213,6 +232,7 @@ func (p *Playout) Reset() {
 	p.ring.clear()
 	p.state = Idle
 	p.sourceIdle = false
+	p.resume = false
 	p.integ, p.adj = 0, 0
 	p.gainTarget = 1
 	p.underruns, p.skips = 0, 0
@@ -292,19 +312,33 @@ func (p *Playout) Read(b []byte) (int, error) {
 				p.startPlaying()
 			case p.sourceIdle:
 				p.state = Idle
+				p.resume = false
 			}
 		}
 		if p.state == Playing {
 			var ok bool
-			if l, r, ok = p.next(); !ok {
-				if p.sourceIdle {
-					p.state = Idle
-				} else {
-					p.state = Priming
-					p.underruns++
-					p.grow()
+			switch l, r, ok = p.next(); {
+			case ok:
+				if p.ramp < p.rampLen {
+					g := float32(p.ramp) / float32(p.rampLen)
+					l, r = l*g, r*g
+					p.ramp++
 				}
+				p.last = [2]float32{l, r}
+			case p.sourceIdle:
+				p.state = Idle
+			default:
+				p.state = Priming
+				p.underruns++
+				p.grow()
+				p.tail, p.resume = true, true
 			}
+		}
+		if p.state != Playing && p.tail {
+			p.last[0] *= p.tailCoef
+			p.last[1] *= p.tailCoef
+			l, r = p.last[0], p.last[1]
+			p.tail = max(abs(l), abs(r)) > 1e-5
 		}
 		p.gain += (p.gainTarget - p.gain) * p.gainCoef
 		binary.LittleEndian.PutUint32(b[8*i:], math.Float32bits(l*p.gain))
@@ -315,6 +349,12 @@ func (p *Playout) Read(b []byte) (int, error) {
 
 func (p *Playout) startPlaying() {
 	p.state = Playing
+	p.tail = false
+	p.ramp = p.rampLen
+	if p.resume {
+		p.ramp = 0
+	}
+	p.resume = false
 	p.hist = [4][2]float32{}
 	p.pos = 3 // the first next() pulls three frames, so output starts exactly on the first one
 	p.fill = float64(p.ring.n)
@@ -352,6 +392,8 @@ func (p *Playout) next() (float32, float32, bool) {
 	p.pos += p.step
 	return l, r, true
 }
+
+func abs(x float32) float32 { return max(x, -x) }
 
 // hermite is 4-point, 3rd-order Hermite interpolation between x0 and x1.
 func hermite(xm1, x0, x1, x2, t float32) float32 {

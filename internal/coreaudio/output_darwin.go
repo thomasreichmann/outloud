@@ -17,7 +17,7 @@ const (
 // muted or at zero volume. Devices without those controls, such as most
 // HDMI outputs, count as not muted.
 func Output() (name string, muted bool, err error) {
-	if err := load(); err != nil {
+	if err := loadBase(); err != nil {
 		return "", false, err
 	}
 	dev, err := defaultOutput()

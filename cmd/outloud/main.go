@@ -138,6 +138,11 @@ func main() {
 	}
 	a := &app{checkNow: make(chan struct{}, 1)}
 	a.log, a.logPath = openLog()
+	// With no window, the tray would count as background work, and Windows
+	// would slow it down now and then, holding up the sound.
+	if err := wasapi.NoThrottling(); err != nil {
+		a.log.Print(err)
+	}
 	a.hostname, _ = os.Hostname()
 	var err error
 	if a.id, err = pairing.LoadIdentity(dataDir("APPDATA")); err != nil {

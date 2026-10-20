@@ -152,6 +152,30 @@ func TestStarvationIsAnUnderrun(t *testing.T) {
 	}
 }
 
+// TestUnderrunDoesNotClick checks that running dry and resuming fade the
+// sound out and back in: no sample steps further than the tone itself does.
+func TestUnderrunDoesNotClick(t *testing.T) {
+	const freq, amp = 1000.0, 0.5
+	s := newSim(48000, 48000, 50*time.Millisecond, 1)
+	s.signal = func(i int) float32 { return amp * float32(math.Sin(2*math.Pi*freq*float64(i)/48000)) }
+	s.run(time.Second)
+	for range 40 {
+		s.read(240)
+	}
+	s.run(time.Second)
+	if st := s.p.Stats(); st.Underruns != 1 || st.State != Playing {
+		t.Fatalf("%d underruns, state %v", st.Underruns, st.State)
+	}
+	out := s.out[48000/2:] // from well into the first playback
+	var maxStep float64
+	for i := 1; i < len(out); i++ {
+		maxStep = math.Max(maxStep, math.Abs(float64(out[i]-out[i-1])))
+	}
+	if limit := 2 * math.Pi * freq / 48000 * amp * 1.1; maxStep > limit {
+		t.Errorf("click: sample step %.4f exceeds %.4f", maxStep, limit)
+	}
+}
+
 func TestTargetAdaptsToUnderruns(t *testing.T) {
 	s := newSim(48000, 48000, 50*time.Millisecond, 1)
 	s.run(time.Second)

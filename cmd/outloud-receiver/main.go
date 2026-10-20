@@ -80,7 +80,7 @@ Flags:
 	name := fs.String("name", "", "name shown to senders (default: this computer's name)")
 	port := fs.Int("port", proto.DefaultPort, "TCP port to listen on")
 	latency := fs.Duration("latency", 80*time.Millisecond, "audio to buffer when the sender does not choose")
-	deviceBuffer := fs.Duration("device-buffer", 40*time.Millisecond, "CoreAudio buffer; raise it if playback crackles")
+	deviceBuffer := fs.Duration("device-buffer", 5*time.Millisecond, "how much audio the output takes at a time; raise it if playback crackles")
 	record := fs.String("record", "", "also write everything played to this WAV file")
 	null := fs.Bool("null", false, "do not open an audio device; consume audio in real time (testing)")
 	capture := fs.String("capture", "system", "what a PC that listens hears: system (this computer's sound, macOS 14.2+), tone (testing) or none")
@@ -207,6 +207,9 @@ func monitor(p *playout.Playout, out output, verbose bool) {
 		idleSince = time.Now()
 		lastLog   time.Time
 		lastErr   error
+		// Missed output cycles are logged at most once a minute.
+		overloads    int64
+		lastOverload time.Time
 	)
 	for range time.Tick(time.Second) {
 		st := p.Stats()
@@ -230,6 +233,12 @@ func monitor(p *playout.Playout, out output, verbose bool) {
 		if err := out.Err(); err != nil && err != lastErr {
 			log.Printf("audio output: %v", err)
 			lastErr = err
+		}
+		if o, ok := out.(interface{ Overloads() int64 }); ok && time.Since(lastOverload) >= time.Minute {
+			if n := o.Overloads(); n > overloads {
+				log.Printf("audio output: missed %d cycles; if it crackles, raise -device-buffer", n-overloads)
+				overloads, lastOverload = n, time.Now()
+			}
 		}
 
 		if st.State != playout.Idle {
