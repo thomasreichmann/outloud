@@ -1,20 +1,30 @@
-## What's new in 0.4.0
+## What's new in 0.5.0
 
-- **Hearing the Mac no longer keeps it awake.** The Mac records only while
-  something on it plays, and stops 10 s after the sound does, so it sleeps
-  as usual while a PC listens.
-- **macOS remembers its permission to record across updates.** The Mac
-  receiver is now signed with Outloud's own certificate. Updating the Mac to
-  0.4.0 asks once more whether Outloud may record its sound; later updates
-  do not.
-- Both changes are on the Mac, so update it. 0.4.0 and 0.3 work together,
-  so updating one side at a time is fine.
-- The licenses of the third-party code in Outloud now come with it, in
-  `THIRD_PARTY_NOTICES.txt`.
+- **Two PCs no longer take a Mac from each other in turn.** Choosing a Mac
+  that another PC uses takes it over. The other PC then waits, says which
+  PC has the Mac, and carries on by itself once the Mac is free. Clicking
+  that line in its menu takes the Mac back.
+- **Updates come to you.** Once a day the tray asks GitHub whether a new
+  release is out, and if so offers to install it, from the top of its menu.
+  If the Mac runs an older Outloud, the menu says so and shows how to update
+  it. **Check for updates** in the menu turns this off.
+- **A version mismatch says which side to update.** This matters for future
+  releases: a PC told that its Mac is newer says "update this PC".
+- **Requirements, corrected:** Outloud needs macOS 13 or later, and always
+  has; earlier notes said 12. The installer now says so on an older Mac.
+- **Smaller fixes:**
+  - The Mac's log no longer grows without end; it stays under about 2 MB.
+  - The tray no longer logs errors when it quits.
+  - `outloud-send -name` sets the name a Mac shows for this PC.
 
-**Coming from 0.2? Update both the PC and the Mac**, with the commands
-below: 0.3 and later cannot talk to 0.2. The first time the updated PC picks
-the Mac, the two pair.
+**Update both the PC and the Mac.** The takeover fix needs both; 0.5.0
+works with 0.3 and 0.4, so one side at a time is fine. Updating a Mac that
+runs 0.4.0 keeps its permission to record. Coming from 0.3 or earlier, macOS
+asks once more.
+
+**Coming from 0.2?** 0.3 and later cannot talk to 0.2, so update both with
+the commands below. The first time the updated PC picks the Mac, the two
+pair.
 
 ## Install
 
